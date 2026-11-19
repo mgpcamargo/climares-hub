@@ -12,449 +12,243 @@ import {
 } from 'd3-force';
 import { select } from 'd3-selection';
 import { zoom, zoomIdentity, ZoomTransform } from 'd3-zoom';
-import {
-  Crosshair,
-  Filter,
-  Layers,
-  RotateCcw,
-  Sparkles,
-  X,
-} from 'lucide-react';
+import { RotateCcw, Search, X } from 'lucide-react';
 import { AXES, AXIS_MAP } from '../data/axes';
-import { HAZARDS, STUDY_REGIONS } from '../data/regionsAndHazards';
-import { ROLE_LABELS, tText, UI } from '../i18n';
+import { REGION_MAP } from '../data/regionsAndHazards';
+import { DOMAIN_LABELS, ROLE_LABELS, UI } from '../i18n';
 import {
   AxisId,
   CollaborationEdge,
-  CommonsAsset,
-  CrossAxisMission,
   Lang,
   LatentBridge,
   Researcher,
 } from '../types';
 
-export type SiloLens = 'hybrid' | 'bridges' | 'latent' | 'all';
-type LayoutMode = 'constellation' | 'cascade' | 'organic';
-type CareerFilter = 'all' | 'ecr' | 'pi';
-type NodeKind = 'researcher' | 'region' | 'hazard' | 'asset' | 'mission';
+export type ConnectionMode = 'all' | 'coauthor' | 'territory' | 'topic';
 
 interface GraphNode extends SimulationNodeDatum {
   id: string;
-  kind: NodeKind;
+  kind: 'axis_hub' | 'researcher';
   label: string;
-  sublabel?: string;
+  sublabel: string;
   color: string;
   radius: number;
-  axisId?: AxisId;
+  axisId: AxisId;
   researcher?: Researcher;
-  regionId?: string;
-  hazardId?: string;
-  asset?: CommonsAsset;
-  mission?: CrossAxisMission;
 }
 
 interface GraphLink extends SimulationLinkDatum<GraphNode> {
   id: string;
   source: string | GraphNode;
   target: string | GraphNode;
-  kind: 'actual_intra' | 'actual_cross' | 'latent' | 'entity';
-  weight: number;
-  score?: number;
-  label?: string;
-  bridge?: LatentBridge;
+  kind: 'hub_tether' | 'coauthor' | 'territory' | 'topic';
+  tag: string;
+  color: string;
 }
 
 interface NetworkGraphViewProps {
   researchers: Researcher[];
   edges: CollaborationEdge[];
   bridges: LatentBridge[];
-  assets: CommonsAsset[];
-  missions: CrossAxisMission[];
   lang: Lang;
-  activePersonaId: string | null;
   focusedResearcherId: string | null;
-  focusedAxisPair: [AxisId, AxisId] | null;
-  lens: SiloLens;
-  onChangeLens: (l: SiloLens) => void;
-  focusedRegionId?: string | null;
   onClearFocusedResearcher: () => void;
-  onChangeAxisPair: (pair: [AxisId, AxisId] | null) => void;
   onSelectResearcher: (id: string) => void;
-  onOpenWarmIntro: (target: Researcher, bridge: LatentBridge | null) => void;
 }
 
-function getAxisAnchor(axisId: AxisId, layout: LayoutMode, w: number, h: number): { x: number; y: number } {
+function getAxisHubPosition(axisId: AxisId, w: number, h: number): { x: number; y: number } {
   const cx = w / 2;
   const cy = h / 2;
   const rx = Math.min(w, h) * 0.34;
   const ry = Math.min(w, h) * 0.33;
-
-  if (layout === 'constellation') {
-    const idx = axisId - 1;
-    const angle = (idx / 11) * Math.PI * 2 - Math.PI / 2;
-    return {
-      x: cx + Math.cos(angle) * rx,
-      y: cy + Math.sin(angle) * ry,
-    };
-  }
-
-  if (layout === 'cascade') {
-    // 4-column scientific cascade: Physical -> Sectoral Systems -> Society/Economy -> Cross-Cutting
-    const positions: Record<AxisId, [number, number]> = {
-      1: [0.16, 0.33],
-      2: [0.16, 0.67],
-      3: [0.42, 0.2],
-      4: [0.42, 0.4],
-      5: [0.42, 0.6],
-      6: [0.42, 0.8],
-      8: [0.68, 0.25],
-      9: [0.68, 0.5],
-      10: [0.68, 0.75],
-      7: [0.87, 0.34],
-      11: [0.87, 0.66],
-    };
-    const [px, py] = positions[axisId];
-    return { x: w * px, y: h * py };
-  }
-
-  return { x: cx, y: cy };
+  const angle = ((axisId - 1) / 11) * Math.PI * 2 - Math.PI / 2;
+  return {
+    x: cx + Math.cos(angle) * rx,
+    y: cy + Math.sin(angle) * ry,
+  };
 }
 
 export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
   researchers,
   edges,
   bridges,
-  assets,
-  missions,
   lang,
-  activePersonaId,
   focusedResearcherId,
-  focusedAxisPair,
-  lens,
-  onChangeLens,
-  focusedRegionId,
   onClearFocusedResearcher,
-  onChangeAxisPair,
   onSelectResearcher,
-  onOpenWarmIntro,
 }) => {
   const t = UI[lang].graph;
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const [dimensions, setDimensions] = useState({ width: 1000, height: 640 });
-  const [layout, setLayout] = useState<LayoutMode>('constellation');
-  const [careerFilter, setCareerFilter] = useState<CareerFilter>('all');
-  const [selectedAxes, setSelectedAxes] = useState<AxisId[]>([]);
-  const [showRegions, setShowRegions] = useState(Boolean(focusedRegionId));
-  const [showHazards, setShowHazards] = useState(false);
-  const [showAssets, setShowAssets] = useState(false);
-  const [showMissions, setShowMissions] = useState(false);
-  const [egoActive, setEgoActive] = useState(false);
-  const [pairA, setPairA] = useState<AxisId | ''>(focusedAxisPair ? focusedAxisPair[0] : '');
-  const [pairB, setPairB] = useState<AxisId | ''>(focusedAxisPair ? focusedAxisPair[1] : '');
-
-  const [hoveredNode, setHoveredNode] = useState<{ node: GraphNode; sx: number; sy: number } | null>(null);
-  const [selectedEntity, setSelectedEntity] = useState<GraphNode | null>(null);
+  const [dimensions, setDimensions] = useState({ width: 1100, height: 660 });
+  const [mode, setMode] = useState<ConnectionMode>('all');
+  const [selectedAxis, setSelectedAxis] = useState<AxisId | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [spotlightId, setSpotlightId] = useState<string | null>(focusedResearcherId);
+  const [hoveredNode, setHoveredNode] = useState<{
+    node: GraphNode;
+    sx: number;
+    sy: number;
+  } | null>(null);
 
   const transformRef = useRef<ZoomTransform>(zoomIdentity);
-  const zoomBehaviorRef = useRef<ReturnType<typeof zoom<HTMLCanvasElement, unknown>> | null>(null);
+  const zoomBehaviorRef = useRef<ReturnType<typeof zoom<HTMLCanvasElement, unknown>> | null>(
+    null
+  );
   const nodesRef = useRef<GraphNode[]>([]);
-  const linksRef = useRef<GraphLink[]>([]);
   const hoveredIdRef = useRef<string | null>(null);
   const simRef = useRef<Simulation<GraphNode, GraphLink> | null>(null);
   const dragNodeRef = useRef<GraphNode | null>(null);
+  const imageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
 
-  // Sync external focused axis pair
-  useEffect(() => {
-    if (focusedAxisPair) {
-      setPairA(focusedAxisPair[0]);
-      setPairB(focusedAxisPair[1]);
-      setSelectedAxes([]);
-    } else {
-      setPairA('');
-      setPairB('');
-    }
-  }, [focusedAxisPair]);
-
-  // If external region focus is triggered from the Map, turn on the Territories layer
-  useEffect(() => {
-    if (focusedRegionId) {
-      setShowRegions(true);
-    }
-  }, [focusedRegionId]);
-
-  // If external researcher focus is triggered, auto-enable ego spotlight
   useEffect(() => {
     if (focusedResearcherId) {
-      setEgoActive(true);
+      setSpotlightId(focusedResearcherId);
     }
   }, [focusedResearcherId]);
 
-  const effectiveEgoId = egoActive ? focusedResearcherId || activePersonaId : null;
+  // Preload available researcher photos for canvas rendering
+  useEffect(() => {
+    for (const r of researchers) {
+      if (r.photoUrl && !imageCacheRef.current.has(r.id)) {
+        const img = new Image();
+        img.src = r.photoUrl;
+        imageCacheRef.current.set(r.id, img);
+      }
+    }
+  }, [researchers]);
 
-  // Observe container size
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        const w = Math.max(320, Math.floor(entry.contentRect.width));
-        const h = Math.max(520, Math.floor(entry.contentRect.height));
-        setDimensions({ width: w, height: h });
+        setDimensions({
+          width: Math.max(320, Math.floor(entry.contentRect.width)),
+          height: Math.max(540, Math.floor(entry.contentRect.height)),
+        });
       }
     });
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
 
-  // Build filtered graph data
+  // Build ONE clear, intuitive graph: 11 Axis Hub nodes + Researcher nodes + 3 explicit connection types
   const graphData = useMemo(() => {
-    const activePair = pairA && pairB && pairA !== pairB ? [pairA, pairB] : null;
+    const nodes: GraphNode[] = [];
+    const links: GraphLink[] = [];
 
-    const filteredResearchers = researchers.filter((r) => {
-      if (careerFilter === 'ecr' && !['postdoc', 'phd', 'msc', 'ic'].includes(r.role)) {
-        return false;
+    // 1. Add the 11 Axis Hub Nodes
+    for (const ax of AXES) {
+      if (selectedAxis && ax.id !== selectedAxis) {
+        // Still keep all 11 hubs visible as anchors, or dim unselected
       }
-      if (careerFilter === 'pi' && !['coordinator', 'pi'].includes(r.role)) {
-        return false;
-      }
-      if (activePair) {
-        return r.primaryAxis === activePair[0] || r.primaryAxis === activePair[1];
-      }
-      if (selectedAxes.length > 0) {
-        return selectedAxes.includes(r.primaryAxis);
-      }
-      return true;
-    });
-
-    const visibleIds = new Set(filteredResearchers.map((r) => r.id));
-    const rMap = new Map(filteredResearchers.map((r) => [r.id, r]));
-
-    // Count cross-axis links per researcher for subtle node sizing
-    const crossDegree = new Map<string, number>();
-    for (const e of edges) {
-      const a = rMap.get(e.source);
-      const b = rMap.get(e.target);
-      if (a && b && a.primaryAxis !== b.primaryAxis) {
-        crossDegree.set(a.id, (crossDegree.get(a.id) || 0) + 1);
-        crossDegree.set(b.id, (crossDegree.get(b.id) || 0) + 1);
-      }
+      nodes.push({
+        id: `hub-${ax.id}`,
+        kind: 'axis_hub',
+        label: ax.code,
+        sublabel: ax.shortName[lang],
+        color: ax.color,
+        radius: 20,
+        axisId: ax.id,
+      });
     }
 
-    const nodes: GraphNode[] = filteredResearchers.map((r) => {
+    // 2. Add Researcher Nodes ( tethered to their primary Axis hub )
+    const visibleIds = new Set<string>();
+    for (const r of researchers) {
       const ax = AXIS_MAP[r.primaryAxis];
       const isLead = r.role === 'coordinator' || r.role === 'pi';
-      const cd = crossDegree.get(r.id) || 0;
-      const radius = isLead ? 13 + Math.min(4, cd) : 8.5 + Math.min(4, cd);
-      return {
+      const hasPhoto = Boolean(r.photoUrl);
+      const radius = isLead ? 13 : hasPhoto ? 11 : 6.5;
+
+      visibleIds.add(r.id);
+      nodes.push({
         id: r.id,
         kind: 'researcher',
-        label: r.name.replace(' (Exemplo)', ''),
+        label: r.name,
         sublabel: `${ax.code} • ${r.unit}`,
         color: ax.color,
         radius,
         axisId: r.primaryAxis,
         researcher: r,
-      };
-    });
+      });
 
-    const links: GraphLink[] = [];
-    let actualCrossCount = 0;
-
-    // Actual collaboration edges
-    for (const e of edges) {
-      if (!visibleIds.has(e.source) || !visibleIds.has(e.target)) continue;
-      const a = rMap.get(e.source)!;
-      const b = rMap.get(e.target)!;
-      const isCross = a.primaryAxis !== b.primaryAxis;
-      if (isCross) actualCrossCount++;
-
-      if (lens === 'latent' && !isCross) continue;
       links.push({
-        id: e.id,
-        source: e.source,
-        target: e.target,
-        kind: isCross ? 'actual_cross' : 'actual_intra',
-        weight: e.weight,
-        label: tText(e.label, lang),
+        id: `tether-${r.id}`,
+        source: `hub-${r.primaryAxis}`,
+        target: r.id,
+        kind: 'hub_tether',
+        tag: ax.code,
+        color: ax.color,
       });
     }
 
-    // Latent cross-axis bridges
-    const latentThreshold = activePair ? 48 : 62;
-    const maxLatent = activePair ? 25 : 42;
-    const topLatent = bridges
-      .filter(
-        (b) =>
-          !b.alreadyConnected &&
-          b.score >= latentThreshold &&
-          visibleIds.has(b.sourceId) &&
-          visibleIds.has(b.targetId)
-      )
-      .slice(0, maxLatent);
-
-    if (lens === 'hybrid' || lens === 'latent') {
-      for (const b of topLatent) {
+    // 3. Explicit Connection Type A: 🤝 Co-authorship & Joint Projects
+    if (mode === 'all' || mode === 'coauthor') {
+      for (const e of edges) {
+        if (!visibleIds.has(e.source) || !visibleIds.has(e.target)) continue;
         links.push({
-          id: b.id,
+          id: `co-${e.id}`,
+          source: e.source,
+          target: e.target,
+          kind: 'coauthor',
+          tag: lang === 'pt' ? '🤝 Coautoria / Projeto' : '🤝 Co-authors / Project',
+          color: '#2DD4BF',
+        });
+      }
+    }
+
+    // 4. Explicit Connection Type B: 📍 Shared Territory (Cross-Axis)
+    if (mode === 'all' || mode === 'territory') {
+      const terrBridges = bridges
+        .filter((b) => b.sharedRegions.length > 0 && visibleIds.has(b.sourceId) && visibleIds.has(b.targetId))
+        .slice(0, 48);
+      for (const b of terrBridges) {
+        const reg = REGION_MAP[b.sharedRegions[0]];
+        links.push({
+          id: `terr-${b.id}`,
           source: b.sourceId,
           target: b.targetId,
-          kind: 'latent',
-          weight: b.score / 25,
-          score: b.score,
-          label: b.reasons[0]?.text[lang],
-          bridge: b,
-        });
-      }
-    }
-
-    // Optional Entity Layers (Regions, Hazards, Assets, Missions)
-    if (showRegions) {
-      for (const reg of STUDY_REGIONS) {
-        const members = filteredResearchers.filter((r) => r.regions.includes(reg.id));
-        if (members.length === 0) continue;
-        const nid = `region:${reg.id}`;
-        nodes.push({
-          id: nid,
-          kind: 'region',
-          label: reg.name[lang],
-          sublabel: `${reg.state} • ${members.length} ${lang === 'pt' ? 'membros' : 'members'}`,
+          kind: 'territory',
+          tag: reg ? `${reg.emoji} ${reg.shortName[lang]}` : '📍 Território',
           color: '#34D399',
-          radius: 10,
-          regionId: reg.id,
         });
-        for (const m of members) {
-          links.push({
-            id: `el-${nid}-${m.id}`,
-            source: m.id,
-            target: nid,
-            kind: 'entity',
-            weight: 1,
-          });
-        }
       }
     }
 
-    if (showHazards) {
-      for (const hz of HAZARDS) {
-        const members = filteredResearchers.filter((r) => r.hazards.includes(hz.id));
-        if (members.length === 0) continue;
-        const nid = `hazard:${hz.id}`;
-        nodes.push({
-          id: nid,
-          kind: 'hazard',
-          label: hz.shortName[lang],
-          sublabel: `${members.length} ${lang === 'pt' ? 'pesquisadores' : 'researchers'}`,
-          color: hz.color,
-          radius: 9.5,
-          hazardId: hz.id,
+    // 5. Explicit Connection Type C: 🔗 Offer ↔ Need Topic Match (Cross-Axis)
+    if (mode === 'all' || mode === 'topic') {
+      const topicBridges = bridges
+        .filter((b) => b.matchedHandshakes.length > 0 && visibleIds.has(b.sourceId) && visibleIds.has(b.targetId))
+        .slice(0, 48);
+      for (const b of topicBridges) {
+        const dom = DOMAIN_LABELS[b.matchedHandshakes[0].offer.domain];
+        links.push({
+          id: `top-${b.id}`,
+          source: b.sourceId,
+          target: b.targetId,
+          kind: 'topic',
+          tag: `${dom.emoji} ${dom.pt}`,
+          color: '#FBBF24',
         });
-        for (const m of members) {
-          links.push({
-            id: `el-${nid}-${m.id}`,
-            source: m.id,
-            target: nid,
-            kind: 'entity',
-            weight: 1,
-          });
-        }
       }
     }
 
-    if (showAssets) {
-      for (const asset of assets) {
-        const maintainers = asset.maintainerIds.filter((id) => visibleIds.has(id));
-        if (maintainers.length === 0) continue;
-        const nid = `asset:${asset.id}`;
-        nodes.push({
-          id: nid,
-          kind: 'asset',
-          label: asset.name,
-          sublabel: `${AXIS_MAP[asset.axisId].code} • ${asset.format}`,
-          color: '#38BDF8',
-          radius: 9.5,
-          axisId: asset.axisId,
-          asset,
-        });
-        for (const mid of maintainers) {
-          links.push({
-            id: `el-${nid}-${mid}`,
-            source: mid,
-            target: nid,
-            kind: 'entity',
-            weight: 1.5,
-          });
-        }
-      }
-    }
+    return { nodes, links };
+  }, [researchers, edges, bridges, mode, selectedAxis, lang]);
 
-    if (showMissions) {
-      for (const mis of missions) {
-        const members = mis.memberIds.filter((id) => visibleIds.has(id));
-        if (members.length === 0) continue;
-        const nid = `mission:${mis.id}`;
-        nodes.push({
-          id: nid,
-          kind: 'mission',
-          label: tText(mis.title, lang),
-          sublabel: `${mis.activeAxes.length} ${lang === 'pt' ? 'eixos ativos' : 'active axes'}`,
-          color: '#C084FC',
-          radius: 12,
-          mission: mis,
-        });
-        for (const mid of members) {
-          links.push({
-            id: `el-${nid}-${mid}`,
-            source: mid,
-            target: nid,
-            kind: 'entity',
-            weight: 1.5,
-          });
-        }
-      }
-    }
+  // Search match
+  const searchedResearchers = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return [];
+    return researchers
+      .filter((r) => r.name.toLowerCase().includes(q) || r.unit.toLowerCase().includes(q))
+      .slice(0, 6);
+  }, [researchers, searchQuery]);
 
-    // Ego-network neighbor set
-    const egoNeighbors = new Set<string>();
-    if (effectiveEgoId && visibleIds.has(effectiveEgoId)) {
-      egoNeighbors.add(effectiveEgoId);
-      for (const l of links) {
-        const s = typeof l.source === 'string' ? l.source : l.source.id;
-        const tg = typeof l.target === 'string' ? l.target : l.target.id;
-        if (s === effectiveEgoId) egoNeighbors.add(tg);
-        if (tg === effectiveEgoId) egoNeighbors.add(s);
-      }
-    }
-
-    return {
-      nodes,
-      links,
-      visibleResearchersCount: filteredResearchers.length,
-      actualCrossCount,
-      latentCount: topLatent.length,
-      egoNeighbors,
-    };
-  }, [
-    researchers,
-    edges,
-    bridges,
-    assets,
-    missions,
-    careerFilter,
-    selectedAxes,
-    pairA,
-    pairB,
-    lens,
-    showRegions,
-    showHazards,
-    showAssets,
-    showMissions,
-    effectiveEgoId,
-    lang,
-  ]);
-
-  // Run D3 simulation and render to Retina HTML5 Canvas
+  // Canvas Simulation & Render
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -468,23 +262,21 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
     canvas.style.width = `${width}px`;
     canvas.style.height = `${height}px`;
 
-    // Preserve previous positions for smooth layout transitions
     const prevPos = new Map(nodesRef.current.map((n) => [n.id, { x: n.x, y: n.y }]));
     const simNodes: GraphNode[] = graphData.nodes.map((n) => {
+      const hubPos = getAxisHubPosition(n.axisId, width, height);
+      if (n.kind === 'axis_hub') {
+        return { ...n, x: hubPos.x, y: hubPos.y, fx: hubPos.x, fy: hubPos.y };
+      }
       const prev = prevPos.get(n.id);
-      const anchor = n.axisId
-        ? getAxisAnchor(n.axisId, layout, width, height)
-        : { x: width / 2, y: height / 2 };
       return {
         ...n,
-        x: prev?.x ?? anchor.x + (Math.random() - 0.5) * 65,
-        y: prev?.y ?? anchor.y + (Math.random() - 0.5) * 65,
+        x: prev?.x ?? hubPos.x + (Math.random() - 0.5) * 55,
+        y: prev?.y ?? hubPos.y + (Math.random() - 0.5) * 55,
       };
     });
     const simLinks: GraphLink[] = graphData.links.map((l) => ({ ...l }));
-
     nodesRef.current = simNodes;
-    linksRef.current = simLinks;
 
     const draw = () => {
       ctx.save();
@@ -497,241 +289,210 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
 
       const cx = width / 2;
       const cy = height / 2;
-      const activePair = pairA && pairB && pairA !== pairB ? [pairA, pairB] : null;
-      const hoverId = hoveredIdRef.current;
-      const egoSet = graphData.egoNeighbors;
-      const hasEgo = Boolean(effectiveEgoId && egoSet.size > 0);
+      const activeId = hoveredIdRef.current || spotlightId;
 
-      // Subtle architectural backdrop cues (Axis Ring or Cascade Columns)
-      if (layout === 'constellation' && !activePair) {
-        const rx = Math.min(width, height) * 0.34;
-        const ry = Math.min(width, height) * 0.33;
-        ctx.save();
-        ctx.beginPath();
-        ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(148, 163, 184, 0.12)';
-        ctx.lineWidth = 1;
-        ctx.setLineDash([4, 6]);
-        ctx.stroke();
-        ctx.setLineDash([]);
+      // Determine connected neighbors of activeId or selectedAxis
+      const connectedNodeIds = new Set<string>();
+      const highlightedLinks: GraphLink[] = [];
 
-        // Axis radial labels outside ring
-        for (const ax of AXES) {
-          if (selectedAxes.length > 0 && !selectedAxes.includes(ax.id)) continue;
-          const angle = ((ax.id - 1) / 11) * Math.PI * 2 - Math.PI / 2;
-          const lx = cx + Math.cos(angle) * (rx + 56);
-          const ly = cy + Math.sin(angle) * (ry + 46);
-          ctx.font = '600 10px "JetBrains Mono", monospace';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillStyle = ax.color;
-          ctx.fillText(ax.code, lx, ly - 6);
-          ctx.font = '500 9.5px Inter, sans-serif';
-          ctx.fillStyle = 'rgba(226, 232, 240, 0.72)';
-          ctx.fillText(ax.shortName[lang], lx, ly + 7);
+      if (activeId) {
+        connectedNodeIds.add(activeId);
+        for (const l of simLinks) {
+          if (l.kind === 'hub_tether') continue;
+          const s = (l.source as GraphNode).id;
+          const tg = (l.target as GraphNode).id;
+          if (s === activeId) {
+            connectedNodeIds.add(tg);
+            highlightedLinks.push(l);
+          } else if (tg === activeId) {
+            connectedNodeIds.add(s);
+            highlightedLinks.push(l);
+          }
         }
-        ctx.restore();
-      } else if (layout === 'cascade' && !activePair) {
-        const cols = [
-          { x: width * 0.16, title: lang === 'pt' ? 'FORÇANTES FÍSICAS' : 'PHYSICAL DRIVERS' },
-          { x: width * 0.42, title: lang === 'pt' ? 'SISTEMAS SETORIAIS' : 'SECTORAL SYSTEMS' },
-          { x: width * 0.68, title: lang === 'pt' ? 'SOCIEDADE & ECONOMIA' : 'SOCIETY & ECONOMY' },
-          { x: width * 0.87, title: lang === 'pt' ? 'TRANSVERSAIS' : 'CROSS-CUTTING' },
-        ];
-        ctx.save();
-        for (const c of cols) {
-          ctx.beginPath();
-          ctx.moveTo(c.x, 38);
-          ctx.lineTo(c.x, height - 24);
-          ctx.strokeStyle = 'rgba(148, 163, 184, 0.08)';
-          ctx.setLineDash([3, 6]);
-          ctx.stroke();
-          ctx.setLineDash([]);
-          ctx.font = '600 10px "JetBrains Mono", monospace';
-          ctx.fillStyle = 'rgba(148, 163, 184, 0.55)';
-          ctx.textAlign = 'center';
-          ctx.fillText(c.title, c.x, 26);
+      } else if (selectedAxis) {
+        for (const n of simNodes) {
+          if (n.axisId === selectedAxis) connectedNodeIds.add(n.id);
         }
-        ctx.restore();
+        for (const l of simLinks) {
+          if (l.kind === 'hub_tether') continue;
+          const s = l.source as GraphNode;
+          const tg = l.target as GraphNode;
+          if (s.axisId === selectedAxis || tg.axisId === selectedAxis) {
+            connectedNodeIds.add(s.id);
+            connectedNodeIds.add(tg.id);
+            highlightedLinks.push(l);
+          }
+        }
       }
 
-      // Draw Links
+      const hasFilter = Boolean(activeId || selectedAxis);
+
+      // 1. Draw Links
       for (const l of simLinks) {
         const s = l.source as GraphNode;
         const tg = l.target as GraphNode;
         if (s.x == null || s.y == null || tg.x == null || tg.y == null) continue;
 
-        const touchesHover = hoverId && (s.id === hoverId || tg.id === hoverId);
-        const inEgo = !hasEgo || (s.id === effectiveEgoId || tg.id === effectiveEgoId);
+        if (l.kind === 'hub_tether') {
+          const dim = hasFilter && !connectedNodeIds.has(tg.id);
+          ctx.beginPath();
+          ctx.moveTo(s.x, s.y);
+          ctx.lineTo(tg.x, tg.y);
+          ctx.strokeStyle = `${l.color}${dim ? '12' : '38'}`;
+          ctx.lineWidth = 1;
+          ctx.stroke();
+          continue;
+        }
 
-        let alpha = 0.45;
-        if (hasEgo && !inEgo) alpha = 0.04;
-        else if (hoverId && !touchesHover) alpha = 0.08;
+        const isHighlighted =
+          (activeId && (s.id === activeId || tg.id === activeId)) ||
+          (selectedAxis && (s.axisId === selectedAxis || tg.axisId === selectedAxis));
+
+        if (hasFilter && !isHighlighted) {
+          continue; // Hide unrelated cross-lines when focusing to keep graph ultra-clean!
+        }
 
         ctx.save();
         ctx.beginPath();
+        const mx = (s.x + tg.x) / 2;
+        const my = (s.y + tg.y) / 2;
+        const ctrlX = mx + (cx - mx) * 0.15;
+        const ctrlY = my + (cy - my) * 0.15;
+        ctx.moveTo(s.x, s.y);
+        ctx.quadraticCurveTo(ctrlX, ctrlY, tg.x, tg.y);
 
-        // Curve cross-axis and latent links gently toward center for readability
-        if (l.kind === 'actual_cross' || l.kind === 'latent') {
-          const mx = (s.x + tg.x) / 2;
-          const my = (s.y + tg.y) / 2;
-          const pull = l.kind === 'latent' ? 0.16 : 0.1;
-          const ctrlX = mx + (cx - mx) * pull;
-          const ctrlY = my + (cy - my) * pull;
-          ctx.moveTo(s.x, s.y);
-          ctx.quadraticCurveTo(ctrlX, ctrlY, tg.x, tg.y);
-        } else {
-          ctx.moveTo(s.x, s.y);
-          ctx.lineTo(tg.x, tg.y);
-        }
-
-        if (l.kind === 'actual_intra') {
-          const baseA = lens === 'bridges' ? 0.07 : 0.34;
-          ctx.strokeStyle = `rgba(148, 163, 184, ${Math.min(baseA, alpha)})`;
-          ctx.lineWidth = touchesHover ? 1.8 : 1.1;
-        } else if (l.kind === 'actual_cross') {
-          const baseA = touchesHover ? 0.95 : hasEgo && !inEgo ? 0.05 : 0.78;
-          ctx.strokeStyle = `rgba(45, 212, 191, ${baseA})`;
-          ctx.lineWidth = touchesHover ? 2.8 : 1.9;
-        } else if (l.kind === 'latent') {
-          const baseA = touchesHover ? 0.98 : hasEgo && !inEgo ? 0.05 : lens === 'latent' ? 0.72 : 0.48;
-          ctx.strokeStyle = `rgba(251, 191, 36, ${baseA})`;
-          ctx.lineWidth = touchesHover ? 2.4 : 1.5;
+        ctx.strokeStyle = l.color;
+        ctx.globalAlpha = isHighlighted ? 0.92 : 0.28;
+        ctx.lineWidth = isHighlighted ? 2.3 : 1.2;
+        if (l.kind !== 'coauthor') {
           ctx.setLineDash([5, 4]);
-        } else {
-          ctx.strokeStyle = `rgba(148, 163, 184, ${touchesHover ? 0.55 : hasEgo && !inEgo ? 0.03 : 0.18})`;
-          ctx.lineWidth = 0.9;
         }
-
         ctx.stroke();
         ctx.restore();
       }
 
-      // Draw Nodes
+      // 2. Draw Visual Reason Tags right on highlighted connection lines (up to 8 clearest tags)
+      if (activeId && highlightedLinks.length > 0) {
+        for (const l of highlightedLinks.slice(0, 7)) {
+          const s = l.source as GraphNode;
+          const tg = l.target as GraphNode;
+          if (s.x == null || s.y == null || tg.x == null || tg.y == null) continue;
+          const mx = (s.x + tg.x) / 2;
+          const my = (s.y + tg.y) / 2;
+          ctx.save();
+          ctx.font = '600 10px Inter, sans-serif';
+          const tw = ctx.measureText(l.tag).width;
+          ctx.fillStyle = 'rgba(11, 18, 25, 0.92)';
+          ctx.strokeStyle = l.color;
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          ctx.roundRect(mx - tw / 2 - 6, my - 9, tw + 12, 18, 6);
+          ctx.fill();
+          ctx.stroke();
+          ctx.fillStyle = '#FFFFFF';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(l.tag, mx, my);
+          ctx.restore();
+        }
+      }
+
+      // 3. Draw Nodes
       for (const n of simNodes) {
         if (n.x == null || n.y == null) continue;
-        const isHovered = hoverId === n.id;
-        const isPersona = activePersonaId === n.id || effectiveEgoId === n.id;
-        const isDimmed =
-          (hasEgo && !egoSet.has(n.id)) ||
-          (hoverId &&
-            hoverId !== n.id &&
-            !simLinks.some((l) => {
-              const s = (l.source as GraphNode).id;
-              const tg = (l.target as GraphNode).id;
-              return (s === hoverId && tg === n.id) || (tg === hoverId && s === n.id);
-            }));
 
-        ctx.save();
-        ctx.globalAlpha = isDimmed ? 0.16 : 1;
-
-        if (n.kind === 'researcher') {
-          const isPI = n.researcher?.role === 'coordinator' || n.researcher?.role === 'pi';
-
-          // Soft glow for hovered or ego/persona
-          if (isHovered || isPersona) {
+        if (n.kind === 'axis_hub') {
+          const isAxisActive = selectedAxis === n.axisId;
+          ctx.save();
+          if (isAxisActive) {
             ctx.beginPath();
             ctx.arc(n.x, n.y, n.radius + 7, 0, Math.PI * 2);
-            ctx.fillStyle = isPersona ? 'rgba(45, 212, 191, 0.28)' : `${n.color}44`;
+            ctx.fillStyle = `${n.color}44`;
             ctx.fill();
           }
-
-          // Outer ring for PIs / Coordinator
-          if (isPI) {
-            ctx.beginPath();
-            ctx.arc(n.x, n.y, n.radius + 3, 0, Math.PI * 2);
-            ctx.strokeStyle = `${n.color}BB`;
-            ctx.lineWidth = 1.4;
-            ctx.stroke();
-          }
-
-          // Core circle
           ctx.beginPath();
           ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
           ctx.fillStyle = n.color;
           ctx.fill();
-          ctx.strokeStyle = isPersona ? '#FFFFFF' : '#091318';
-          ctx.lineWidth = isPersona ? 2.5 : 1.5;
+          ctx.strokeStyle = '#FFFFFF';
+          ctx.lineWidth = isAxisActive ? 3 : 2;
           ctx.stroke();
 
-          // Label: always show for PIs, hovered, ego, focused pair, or zoomed in
-          const showLabel =
-            isPI || isHovered || isPersona || Boolean(activePair) || tr.k >= 1.35 || hasEgo;
-          if (showLabel && !isDimmed) {
-            ctx.font = `${isPI || isHovered ? '600' : '500'} ${isHovered ? 11.5 : 10}px Inter, sans-serif`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'top';
-            const shortName = n.label.split(' ').slice(0, 2).join(' ');
-            const tw = ctx.measureText(shortName).width;
-            ctx.fillStyle = 'rgba(9, 19, 24, 0.78)';
-            ctx.beginPath();
-            ctx.roundRect(n.x - tw / 2 - 4, n.y + n.radius + 4, tw + 8, 15, 4);
-            ctx.fill();
-            ctx.fillStyle = isHovered ? '#FFFFFF' : 'rgba(241, 245, 249, 0.92)';
-            ctx.fillText(shortName, n.x, n.y + n.radius + 6.5);
-          }
-        } else if (n.kind === 'region') {
-          // Diamond
-          const r = n.radius;
+          ctx.font = '800 11px "JetBrains Mono", monospace';
+          ctx.fillStyle = '#FFFFFF';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(n.label, n.x, n.y);
+
+          // Axis short name pill outside hub
+          const angle = ((n.axisId - 1) / 11) * Math.PI * 2 - Math.PI / 2;
+          const lx = n.x + Math.cos(angle) * 34;
+          const ly = n.y + Math.sin(angle) * 30;
+          ctx.font = '700 10px Inter, sans-serif';
+          ctx.fillStyle = 'rgba(241, 245, 249, 0.9)';
+          ctx.fillText(n.sublabel, lx, ly);
+          ctx.restore();
+          continue;
+        }
+
+        const isHovered = activeId === n.id;
+        const isVisible = !hasFilter || connectedNodeIds.has(n.id);
+        const isLead = n.researcher?.role === 'coordinator' || n.researcher?.role === 'pi';
+
+        ctx.save();
+        ctx.globalAlpha = isVisible ? 1 : 0.14;
+
+        if (isHovered) {
           ctx.beginPath();
-          ctx.moveTo(n.x, n.y - r);
-          ctx.lineTo(n.x + r, n.y);
-          ctx.lineTo(n.x, n.y + r);
-          ctx.lineTo(n.x - r, n.y);
-          ctx.closePath();
-          ctx.fillStyle = '#10B981';
+          ctx.arc(n.x, n.y, n.radius + 6, 0, Math.PI * 2);
+          ctx.fillStyle = `${n.color}55`;
           ctx.fill();
-          ctx.strokeStyle = '#ECFDF5';
-          ctx.lineWidth = 1.4;
-          ctx.stroke();
-        } else if (n.kind === 'hazard') {
-          // Triangle
-          const r = n.radius;
-          ctx.beginPath();
-          ctx.moveTo(n.x, n.y - r);
-          ctx.lineTo(n.x + r * 0.95, n.y + r * 0.8);
-          ctx.lineTo(n.x - r * 0.95, n.y + r * 0.8);
-          ctx.closePath();
-          ctx.fillStyle = n.color;
-          ctx.fill();
-          ctx.strokeStyle = '#FFFBEB';
-          ctx.lineWidth = 1.2;
-          ctx.stroke();
-        } else if (n.kind === 'asset') {
-          // Hexagon
-          const r = n.radius;
-          ctx.beginPath();
-          for (let i = 0; i < 6; i++) {
-            const a = (Math.PI / 3) * i - Math.PI / 6;
-            const px = n.x + r * Math.cos(a);
-            const py = n.y + r * Math.sin(a);
-            if (i === 0) ctx.moveTo(px, py);
-            else ctx.lineTo(px, py);
-          }
-          ctx.closePath();
-          ctx.fillStyle = '#0284C7';
-          ctx.fill();
-          ctx.strokeStyle = '#E0F2FE';
-          ctx.lineWidth = 1.3;
-          ctx.stroke();
-        } else if (n.kind === 'mission') {
-          // Double Violet Ring
+        }
+
+        const cachedImg = imageCacheRef.current.get(n.id);
+        if (cachedImg && cachedImg.complete && cachedImg.naturalWidth > 0) {
+          ctx.save();
           ctx.beginPath();
           ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(168, 85, 247, 0.24)';
+          ctx.closePath();
+          ctx.clip();
+          ctx.drawImage(
+            cachedImg,
+            n.x - n.radius,
+            n.y - n.radius,
+            n.radius * 2,
+            n.radius * 2
+          );
+          ctx.restore();
+
+          ctx.beginPath();
+          ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
+          ctx.strokeStyle = isHovered ? '#FFFFFF' : n.color;
+          ctx.lineWidth = isHovered ? 2.5 : 2;
+          ctx.stroke();
+        } else {
+          ctx.beginPath();
+          ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
+          ctx.fillStyle = n.color;
           ctx.fill();
-          ctx.strokeStyle = '#C084FC';
-          ctx.lineWidth = 2.2;
+          ctx.strokeStyle = isHovered ? '#FFFFFF' : '#081016';
+          ctx.lineWidth = isHovered ? 2.2 : 1.2;
           ctx.stroke();
         }
 
-        // Entity node label when hovered or zoomed
-        if (n.kind !== 'researcher' && (isHovered || tr.k >= 1.25) && !isDimmed) {
-          ctx.font = '600 10px Inter, sans-serif';
+        // Show name label for PIs, hovered/connected nodes, or when zoomed in
+        if ((isLead || isHovered || (hasFilter && isVisible) || tr.k >= 1.55) && isVisible) {
+          const shortName = n.label.split(' ').slice(0, 2).join(' ');
+          ctx.font = `${isLead || isHovered ? '700' : '500'} 10px Inter, sans-serif`;
           ctx.textAlign = 'center';
-          ctx.fillStyle = '#F8FAFC';
-          const shortLbl = n.label.length > 26 ? `${n.label.slice(0, 24)}…` : n.label;
-          ctx.fillText(shortLbl, n.x, n.y + n.radius + 11);
+          ctx.textBaseline = 'top';
+          const tw = ctx.measureText(shortName).width;
+          ctx.fillStyle = 'rgba(8, 16, 22, 0.84)';
+          ctx.beginPath();
+          ctx.roundRect(n.x - tw / 2 - 4, n.y + n.radius + 3, tw + 8, 14, 4);
+          ctx.fill();
+          ctx.fillStyle = isHovered ? '#5EEAD4' : '#F8FAFC';
+          ctx.fillText(shortName, n.x, n.y + n.radius + 5);
         }
 
         ctx.restore();
@@ -740,63 +501,29 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
       ctx.restore();
     };
 
-    const activePair = pairA && pairB && pairA !== pairB ? [pairA, pairB] : null;
     const sim = forceSimulation<GraphNode>(simNodes)
       .force(
         'link',
         forceLink<GraphNode, GraphLink>(simLinks)
           .id((d) => d.id)
-          .distance((l) => {
-            if (l.kind === 'actual_intra') return 58;
-            if (l.kind === 'entity') return 85;
-            return activePair ? 170 : 140;
-          })
-          .strength((l) => {
-            if (l.kind === 'actual_intra') return layout === 'organic' ? 0.65 : 0.25;
-            if (l.kind === 'actual_cross') return layout === 'organic' ? 0.35 : 0.06;
-            if (l.kind === 'latent') return 0.02;
-            return 0.1;
-          })
+          .distance((l) => (l.kind === 'hub_tether' ? 42 : 140))
+          .strength((l) => (l.kind === 'hub_tether' ? 0.85 : 0.015))
       )
-      .force('charge', forceManyBody().strength(layout === 'organic' ? -240 : -115))
-      .force('collide', forceCollide<GraphNode>().radius((d) => d.radius + 13).iterations(2));
-
-    if (activePair) {
-      sim
-        .force(
-          'x',
-          forceX<GraphNode>((d) => {
-            if (d.axisId === activePair[0]) return width * 0.28;
-            if (d.axisId === activePair[1]) return width * 0.72;
-            return width * 0.5;
-          }).strength(0.32)
-        )
-        .force('y', forceY<GraphNode>(height / 2).strength(0.1));
-    } else if (layout === 'constellation' || layout === 'cascade') {
-      sim
-        .force(
-          'x',
-          forceX<GraphNode>((d) =>
-            d.axisId ? getAxisAnchor(d.axisId, layout, width, height).x : width / 2
-          ).strength((d) => (d.kind === 'researcher' ? 0.32 : 0.08))
-        )
-        .force(
-          'y',
-          forceY<GraphNode>((d) =>
-            d.axisId ? getAxisAnchor(d.axisId, layout, width, height).y : height / 2
-          ).strength((d) => (d.kind === 'researcher' ? 0.32 : 0.08))
-        );
-    } else {
-      sim
-        .force('x', forceX<GraphNode>(width / 2).strength(0.06))
-        .force('y', forceY<GraphNode>(height / 2).strength(0.06));
-    }
+      .force('charge', forceManyBody<GraphNode>().strength((d) => (d.kind === 'axis_hub' ? -220 : -38)))
+      .force('collide', forceCollide<GraphNode>().radius((d) => d.radius + 4).iterations(2))
+      .force(
+        'x',
+        forceX<GraphNode>((d) => getAxisHubPosition(d.axisId, width, height).x).strength(0.18)
+      )
+      .force(
+        'y',
+        forceY<GraphNode>((d) => getAxisHubPosition(d.axisId, width, height).y).strength(0.18)
+      );
 
     sim.on('tick', draw);
     simRef.current = sim;
 
-    // Helper: screen to graph coordinate hit test
-    const findNodeAt = (clientX: number, clientY: number): { node: GraphNode; sx: number; sy: number } | null => {
+    const findNodeAt = (clientX: number, clientY: number) => {
       const rect = canvas.getBoundingClientRect();
       const sx = clientX - rect.left;
       const sy = clientY - rect.top;
@@ -807,23 +534,19 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
       for (let i = simNodes.length - 1; i >= 0; i--) {
         const n = simNodes[i];
         if (n.x == null || n.y == null) continue;
-        const dx = gx - n.x;
-        const dy = gy - n.y;
-        const hitR = n.radius + 7;
-        if (dx * dx + dy * dy <= hitR * hitR) {
+        const hitR = n.radius + 5;
+        if ((gx - n.x) ** 2 + (gy - n.y) ** 2 <= hitR * hitR) {
           return { node: n, sx, sy };
         }
       }
       return null;
     };
 
-    // Zoom behavior (disabled while dragging a node)
     const zoomBehavior = zoom<HTMLCanvasElement, unknown>()
-      .scaleExtent([0.4, 3.2])
+      .scaleExtent([0.45, 3.5])
       .filter((event) => {
         if (event.type === 'mousedown' || event.type === 'pointerdown') {
-          const hit = findNodeAt(event.clientX, event.clientY);
-          if (hit) return false;
+          if (findNodeAt(event.clientX, event.clientY)) return false;
         }
         return !event.button;
       })
@@ -846,9 +569,11 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
         dragNodeRef.current = hit.node;
         pointerDownPos = { x: e.clientX, y: e.clientY };
         moved = false;
-        hit.node.fx = hit.node.x;
-        hit.node.fy = hit.node.y;
-        sim.alphaTarget(0.25).restart();
+        if (hit.node.kind !== 'axis_hub') {
+          hit.node.fx = hit.node.x;
+          hit.node.fy = hit.node.y;
+          sim.alphaTarget(0.2).restart();
+        }
         canvas.setPointerCapture(e.pointerId);
       }
     };
@@ -861,16 +586,18 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
         ) {
           moved = true;
         }
-        const rect = canvas.getBoundingClientRect();
-        const tr = transformRef.current;
-        dragNodeRef.current.fx = (e.clientX - rect.left - tr.x) / tr.k;
-        dragNodeRef.current.fy = (e.clientY - rect.top - tr.y) / tr.k;
-        draw();
+        if (dragNodeRef.current.kind !== 'axis_hub') {
+          const rect = canvas.getBoundingClientRect();
+          const tr = transformRef.current;
+          dragNodeRef.current.fx = (e.clientX - rect.left - tr.x) / tr.k;
+          dragNodeRef.current.fy = (e.clientY - rect.top - tr.y) / tr.k;
+          draw();
+        }
         return;
       }
 
       const hit = findNodeAt(e.clientX, e.clientY);
-      const nextId = hit ? hit.node.id : null;
+      const nextId = hit && hit.node.kind === 'researcher' ? hit.node.id : null;
       canvas.style.cursor = hit ? 'pointer' : 'grab';
       if (hoveredIdRef.current !== nextId) {
         hoveredIdRef.current = nextId;
@@ -882,8 +609,10 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
     const onPointerUp = (e: PointerEvent) => {
       if (dragNodeRef.current) {
         const clicked = dragNodeRef.current;
-        clicked.fx = null;
-        clicked.fy = null;
+        if (clicked.kind !== 'axis_hub') {
+          clicked.fx = null;
+          clicked.fy = null;
+        }
         dragNodeRef.current = null;
         sim.alphaTarget(0);
         try {
@@ -891,28 +620,20 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
         } catch {}
 
         if (!moved) {
-          if (clicked.kind === 'researcher' && clicked.researcher) {
-            setSelectedEntity(null);
+          if (clicked.kind === 'axis_hub') {
+            setSelectedAxis((prev) => (prev === clicked.axisId ? null : clicked.axisId));
+            setSpotlightId(null);
+          } else if (clicked.researcher) {
+            setSpotlightId(clicked.researcher.id);
             onSelectResearcher(clicked.researcher.id);
-          } else {
-            setSelectedEntity(clicked);
           }
         }
-      }
-    };
-
-    const onPointerLeave = () => {
-      if (!dragNodeRef.current) {
-        hoveredIdRef.current = null;
-        setHoveredNode(null);
-        draw();
       }
     };
 
     canvas.addEventListener('pointerdown', onPointerDown);
     canvas.addEventListener('pointermove', onPointerMove);
     canvas.addEventListener('pointerup', onPointerUp);
-    canvas.addEventListener('pointerleave', onPointerLeave);
 
     return () => {
       sim.stop();
@@ -920,489 +641,195 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
       canvas.removeEventListener('pointerdown', onPointerDown);
       canvas.removeEventListener('pointermove', onPointerMove);
       canvas.removeEventListener('pointerup', onPointerUp);
-      canvas.removeEventListener('pointerleave', onPointerLeave);
     };
-  }, [graphData, dimensions, layout, lens, pairA, pairB, selectedAxes, activePersonaId, effectiveEgoId, lang, onSelectResearcher]);
+  }, [graphData, dimensions, spotlightId, selectedAxis, lang, onSelectResearcher]);
 
-  const handleResetZoom = () => {
+  const handleReset = () => {
+    setSelectedAxis(null);
+    setSpotlightId(null);
+    onClearFocusedResearcher();
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    transformRef.current = zoomIdentity;
-    if (zoomBehaviorRef.current) {
+    if (canvas && zoomBehaviorRef.current) {
+      transformRef.current = zoomIdentity;
       select(canvas).call(zoomBehaviorRef.current.transform, zoomIdentity);
     }
-    simRef.current?.alpha(0.3).restart();
+    simRef.current?.alpha(0.25).restart();
   };
-
-  const toggleAxisFilter = (axId: AxisId) => {
-    setPairA('');
-    setPairB('');
-    onChangeAxisPair(null);
-    setSelectedAxes((prev) =>
-      prev.includes(axId) ? prev.filter((id) => id !== axId) : [...prev, axId]
-    );
-  };
-
-  const applyPair = (a: AxisId | '', b: AxisId | '') => {
-    setPairA(a);
-    setPairB(b);
-    if (a && b && a !== b) {
-      setSelectedAxes([]);
-      onChangeAxisPair([a, b]);
-    } else if (!a && !b) {
-      onChangeAxisPair(null);
-    }
-  };
-
-  // Members connected to a clicked non-researcher entity node
-  const selectedEntityMembers = useMemo(() => {
-    if (!selectedEntity) return [];
-    if (selectedEntity.regionId) {
-      return researchers.filter((r) => r.regions.includes(selectedEntity.regionId!));
-    }
-    if (selectedEntity.hazardId) {
-      return researchers.filter((r) => r.hazards.includes(selectedEntity.hazardId!));
-    }
-    if (selectedEntity.asset) {
-      return researchers.filter((r) => selectedEntity.asset!.maintainerIds.includes(r.id));
-    }
-    if (selectedEntity.mission) {
-      return researchers.filter((r) => selectedEntity.mission!.memberIds.includes(r.id));
-    }
-    return [];
-  }, [selectedEntity, researchers]);
-
-  // Top pair bridge highlight when 2 axes are focused
-  const pairBridges = useMemo(() => {
-    if (!pairA || !pairB || pairA === pairB) return [];
-    return bridges
-      .filter(
-        (b) =>
-          (b.sourceAxis === pairA && b.targetAxis === pairB) ||
-          (b.sourceAxis === pairB && b.targetAxis === pairA)
-      )
-      .slice(0, 4);
-  }, [bridges, pairA, pairB]);
-
-  const rById = useMemo(() => new Map(researchers.map((r) => [r.id, r])), [researchers]);
 
   return (
-    <div className="space-y-3.5">
-      {/* Compact Top Control Bar */}
-      <div className="bg-white rounded-2xl border border-slate-200/90 p-3.5 shadow-2xs space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          {/* Layout switcher */}
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-              {t.layoutLabel}
-            </span>
-            <div className="inline-flex rounded-lg bg-slate-100 p-0.5 text-xs font-semibold">
-              {(['constellation', 'cascade', 'organic'] as LayoutMode[]).map((m) => (
-                <button
-                  key={m}
-                  onClick={() => setLayout(m)}
-                  className={`px-2.5 py-1.5 rounded-md transition cursor-pointer ${
-                    layout === m
-                      ? 'bg-white text-slate-900 shadow-2xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  {t.layouts[m]}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Anti-Silo Lens */}
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-teal-700 flex items-center gap-1">
-              <Sparkles className="w-3.5 h-3.5" />
-              {t.siloLens}
-            </span>
-            <select
-              value={lens}
-              onChange={(e) => onChangeLens(e.target.value as SiloLens)}
-              className="text-xs font-semibold bg-teal-50 text-teal-950 border border-teal-200 rounded-lg px-2.5 py-1.5 focus:outline-none cursor-pointer"
-            >
-              <option value="hybrid">{t.lenses.hybrid}</option>
-              <option value="bridges">{t.lenses.bridges}</option>
-              <option value="latent">{t.lenses.latent}</option>
-              <option value="all">{t.lenses.all}</option>
-            </select>
-
-            {/* Career filter */}
-            <select
-              value={careerFilter}
-              onChange={(e) => setCareerFilter(e.target.value as CareerFilter)}
-              className="text-xs font-medium bg-slate-50 text-slate-700 border border-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none cursor-pointer"
-              aria-label={t.careerFilter}
-            >
-              <option value="all">{t.allCareers}</option>
-              <option value="ecr">{t.ecrOnly}</option>
-              <option value="pi">{t.piOnly}</option>
-            </select>
-          </div>
-        </div>
-
-        {/* Second Row: Node Layers + Axis Pair Focus + Ego Spotlight */}
-        <div className="flex flex-wrap items-center justify-between gap-3 pt-2.5 border-t border-slate-100">
-          {/* Entity node layers */}
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1 mr-1">
-              <Layers className="w-3.5 h-3.5" />
-              {t.layers}:
-            </span>
-            {[
-              { key: 'regions', active: showRegions, toggle: () => setShowRegions((v) => !v), dot: '#10B981' },
-              { key: 'hazards', active: showHazards, toggle: () => setShowHazards((v) => !v), dot: '#F97316' },
-              { key: 'assets', active: showAssets, toggle: () => setShowAssets((v) => !v), dot: '#0284C7' },
-              { key: 'missions', active: showMissions, toggle: () => setShowMissions((v) => !v), dot: '#A855F7' },
-            ].map((layer) => (
-              <button
-                key={layer.key}
-                onClick={layer.toggle}
-                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border transition cursor-pointer ${
-                  layer.active
-                    ? 'bg-slate-900 text-white border-slate-900'
-                    : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
-                }`}
-              >
-                <span
-                  className="w-2 h-2 rounded-full"
-                  style={{ backgroundColor: layer.dot }}
-                />
-                {t.layerLabels[layer.key as keyof typeof t.layerLabels]}
-              </button>
-            ))}
-          </div>
-
-          {/* Axis pair compare + Ego spotlight */}
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-xs">
-              <Filter className="w-3 h-3 text-slate-400" />
-              <span className="text-[11px] text-slate-500 font-medium hidden sm:inline">
-                {t.pairFocus}:
-              </span>
-              <select
-                value={pairA}
-                onChange={(e) => applyPair(e.target.value ? (Number(e.target.value) as AxisId) : '', pairB)}
-                className="bg-transparent font-semibold text-slate-800 focus:outline-none cursor-pointer"
-              >
-                <option value="">Eixo A</option>
-                {AXES.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.code} {a.shortName[lang]}
-                  </option>
-                ))}
-              </select>
-              <span className="text-slate-400 font-bold">↔</span>
-              <select
-                value={pairB}
-                onChange={(e) => applyPair(pairA, e.target.value ? (Number(e.target.value) as AxisId) : '')}
-                className="bg-transparent font-semibold text-slate-800 focus:outline-none cursor-pointer"
-              >
-                <option value="">Eixo B</option>
-                {AXES.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.code} {a.shortName[lang]}
-                  </option>
-                ))}
-              </select>
-              {(pairA || pairB) && (
-                <button
-                  onClick={() => applyPair('', '')}
-                  className="p-0.5 text-slate-400 hover:text-slate-800 cursor-pointer"
-                  title={t.clearFocus}
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-
-            {(activePersonaId || focusedResearcherId) && (
-              <button
-                onClick={() => {
-                  if (egoActive) {
-                    setEgoActive(false);
-                    onClearFocusedResearcher();
-                  } else {
-                    setEgoActive(true);
-                  }
-                }}
-                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer ${
-                  egoActive
-                    ? 'bg-teal-600 text-white border-teal-600 shadow-xs'
-                    : 'bg-white text-teal-800 border-teal-300 hover:bg-teal-50'
-                }`}
-              >
-                <Crosshair className="w-3.5 h-3.5" />
-                {t.egoMode}
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Interactive 11-Axis Filter Strip */}
-        <div className="flex flex-wrap items-center gap-1.5 pt-1">
-          {AXES.map((ax) => {
-            const active =
-              selectedAxes.includes(ax.id) || pairA === ax.id || pairB === ax.id;
-            const dimmed =
-              (selectedAxes.length > 0 || (pairA && pairB)) && !active;
+    <div className="space-y-3">
+      {/* ONE Simple Visual Bar: How Are People Connected? + Search */}
+      <div className="bg-white dark:bg-[#121C26] rounded-2xl border border-slate-200 dark:border-slate-800 p-3 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-xs font-bold text-slate-500 dark:text-slate-400 mr-1">
+            {t.connectBy}
+          </span>
+          {(
+            [
+              { id: 'all', label: t.modes.all, dot: '#38BDF8' },
+              { id: 'coauthor', label: t.modes.coauthor, dot: '#2DD4BF' },
+              { id: 'territory', label: t.modes.territory, dot: '#34D399' },
+              { id: 'topic', label: t.modes.topic, dot: '#FBBF24' },
+            ] as const
+          ).map((m) => {
+            const active = mode === m.id;
             return (
               <button
-                key={ax.id}
-                onClick={() => toggleAxisFilter(ax.id)}
-                className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-semibold border transition cursor-pointer ${
+                key={m.id}
+                onClick={() => setMode(m.id)}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition cursor-pointer ${
                   active
-                    ? 'text-white shadow-2xs'
-                    : dimmed
-                    ? 'bg-slate-50 text-slate-400 border-slate-200/70 hover:text-slate-700'
-                    : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300'
+                    ? 'bg-slate-900 dark:bg-teal-600 text-white border-transparent shadow-xs'
+                    : 'bg-slate-50 dark:bg-[#0B1219] text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-800 hover:border-slate-400'
                 }`}
-                style={
-                  active
-                    ? { backgroundColor: ax.color, borderColor: ax.color }
-                    : undefined
-                }
-                title={ax.name[lang]}
               >
-                <span
-                  className="w-2 h-2 rounded-full shrink-0"
-                  style={{ backgroundColor: active ? '#ffffff' : ax.color }}
-                />
-                <span className="font-mono-code">{ax.code}</span>
-                <span className="hidden xl:inline">{ax.shortName[lang]}</span>
+                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: m.dot }} />
+                {m.label}
               </button>
             );
           })}
-          {selectedAxes.length > 0 && (
+        </div>
+
+        {/* Simple Person Finder */}
+        <div className="relative">
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder={t.searchNode}
+                className="pl-8 pr-7 py-1.5 rounded-xl bg-slate-50 dark:bg-[#0B1219] border border-slate-200 dark:border-slate-800 text-xs text-slate-900 dark:text-white w-48 focus:outline-none focus:border-teal-500"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 cursor-pointer"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </div>
             <button
-              onClick={() => setSelectedAxes([])}
-              className="text-[11px] font-semibold text-teal-700 hover:underline px-2 cursor-pointer"
+              onClick={handleReset}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-200 cursor-pointer"
             >
-              {t.clearFocus}
+              <RotateCcw className="w-3.5 h-3.5" />
+              {t.resetZoom}
             </button>
+          </div>
+
+          {searchedResearchers.length > 0 && (
+            <div className="absolute right-0 mt-1 w-64 rounded-xl bg-white dark:bg-[#121C26] border border-slate-200 dark:border-slate-700 shadow-xl z-30 py-1">
+              {searchedResearchers.map((r) => (
+                <button
+                  key={r.id}
+                  onClick={() => {
+                    setSpotlightId(r.id);
+                    setSearchQuery('');
+                  }}
+                  className="w-full px-3 py-1.5 text-left text-xs hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-between gap-2 cursor-pointer"
+                >
+                  <span className="font-semibold text-slate-900 dark:text-white truncate">
+                    {r.name}
+                  </span>
+                  <span
+                    className="px-1.5 py-0.2 rounded text-[10px] font-mono-code font-bold text-white shrink-0"
+                    style={{ backgroundColor: AXIS_MAP[r.primaryAxis].color }}
+                  >
+                    {AXIS_MAP[r.primaryAxis].code}
+                  </span>
+                </button>
+              ))}
+            </div>
           )}
         </div>
       </div>
 
-      {/* Main Deep Observatory Canvas Container */}
+      {/* Main Graph Canvas */}
       <div
         ref={containerRef}
-        className="relative w-full h-[630px] lg:h-[690px] rounded-2xl overflow-hidden observatory-bg observatory-grid border border-slate-800/90 shadow-xl"
+        className="relative w-full h-[640px] lg:h-[700px] rounded-2xl overflow-hidden observatory-bg border border-slate-800 shadow-xl"
       >
         <canvas ref={canvasRef} className="block w-full h-full touch-none" />
 
-        {/* Top-left Live Telemetry Pill */}
-        <div className="absolute top-3.5 left-3.5 flex flex-wrap items-center gap-2 pointer-events-none">
-          <div className="px-3 py-1.5 rounded-xl bg-slate-950/75 backdrop-blur-md border border-slate-700/70 text-[11px] text-slate-200 flex items-center gap-3">
+        {/* Active Spotlight Pill */}
+        {(spotlightId || selectedAxis) && (
+          <div className="absolute top-3.5 left-3.5 px-3 py-1.5 rounded-xl bg-slate-950/85 border border-teal-500/40 text-xs text-white flex items-center gap-2">
             <span>
-              <strong className="font-mono-code text-white">{graphData.visibleResearchersCount}</strong>{' '}
-              {t.statsVisible}
+              {selectedAxis
+                ? `${AXIS_MAP[selectedAxis].code} — ${AXIS_MAP[selectedAxis].shortName[lang]}`
+                : researchers.find((r) => r.id === spotlightId)?.name}
             </span>
-            <span className="text-slate-600">|</span>
-            <span className="text-teal-300">
-              <strong className="font-mono-code">{graphData.actualCrossCount}</strong>{' '}
-              {t.statsActualCross}
-            </span>
-            <span className="text-slate-600">|</span>
-            <span className="text-amber-300">
-              <strong className="font-mono-code">{graphData.latentCount}</strong>{' '}
-              {t.statsLatent}
-            </span>
-          </div>
-
-          {effectiveEgoId && rById.get(effectiveEgoId) && (
-            <div className="pointer-events-auto px-3 py-1.5 rounded-xl bg-teal-950/90 border border-teal-400/50 text-xs text-teal-100 flex items-center gap-2">
-              <Crosshair className="w-3.5 h-3.5 text-teal-300" />
-              <span>
-                Ego: <strong>{rById.get(effectiveEgoId)!.name}</strong>
-              </span>
-              <button
-                onClick={() => {
-                  setEgoActive(false);
-                  onClearFocusedResearcher();
-                }}
-                className="text-teal-300 hover:text-white cursor-pointer"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Top-right Zoom Reset */}
-        <div className="absolute top-3.5 right-3.5 flex items-center gap-1.5">
-          <button
-            onClick={handleResetZoom}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-950/75 hover:bg-slate-900 text-slate-200 border border-slate-700/70 text-xs font-medium backdrop-blur-md cursor-pointer"
-            title={t.resetZoom}
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">{t.resetZoom}</span>
-          </button>
-        </div>
-
-        {/* Bottom-left Legend */}
-        <div className="absolute bottom-3.5 left-3.5 max-w-md px-3.5 py-2.5 rounded-xl bg-slate-950/78 backdrop-blur-md border border-slate-800 text-[11px] text-slate-300 space-y-1 pointer-events-none">
-          <div className="flex items-center gap-2">
-            <span className="w-5 h-0.5 bg-teal-400 inline-block rounded" />
-            <span>{t.legendSolid}</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="w-5 h-0 border-t-2 border-dashed border-amber-400 inline-block" />
-            <span>{t.legendDashed}</span>
-          </div>
-          <p className="text-[10px] text-slate-400 pt-0.5">{t.clickHint}</p>
-        </div>
-
-        {/* Axis Pair Inspector Overlay (when 2 axes focused!) */}
-        {pairA && pairB && pairA !== pairB && (
-          <div className="absolute bottom-3.5 right-3.5 w-80 sm:w-96 max-h-72 overflow-y-auto rounded-xl bg-slate-950/90 backdrop-blur-md border border-teal-500/40 p-3.5 text-slate-100 shadow-2xl">
-            <div className="flex items-center justify-between gap-2 mb-2">
-              <div className="text-xs font-bold flex items-center gap-1.5">
-                <span style={{ color: AXIS_MAP[pairA].color }}>{AXIS_MAP[pairA].code}</span>
-                <span>↔</span>
-                <span style={{ color: AXIS_MAP[pairB].color }}>{AXIS_MAP[pairB].code}</span>
-                <span className="text-slate-400 font-normal">
-                  ({pairBridges.length} {lang === 'pt' ? 'pontes' : 'bridges'})
-                </span>
-              </div>
-              <button
-                onClick={() => applyPair('', '')}
-                className="text-slate-400 hover:text-white cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            {pairBridges.length === 0 ? (
-              <p className="text-xs text-slate-400">
-                {lang === 'pt'
-                  ? 'Nenhuma ponte forte detectada ainda entre estes dois eixos.'
-                  : 'No strong bridges detected yet between these two axes.'}
-              </p>
-            ) : (
-              <div className="space-y-2">
-                {pairBridges.map((b) => {
-                  const rA = rById.get(b.sourceId);
-                  const rB = rById.get(b.targetId);
-                  if (!rA || !rB) return null;
-                  return (
-                    <div
-                      key={b.id}
-                      className="p-2.5 rounded-lg bg-slate-900/90 border border-slate-700/80 text-[11px] space-y-1"
-                    >
-                      <div className="flex items-center justify-between gap-1">
-                        <span className="font-semibold text-white truncate">
-                          {rA.name.split(' ')[0]} ↔ {rB.name.split(' ')[0]}
-                        </span>
-                        <span className="font-mono-code font-bold text-amber-300 shrink-0">
-                          {b.score}%
-                        </span>
-                      </div>
-                      <p className="text-slate-300 leading-snug">{b.reasons[0]?.text[lang]}</p>
-                      <button
-                        onClick={() => onOpenWarmIntro(rB, b)}
-                        className="text-teal-300 hover:text-teal-200 font-semibold cursor-pointer"
-                      >
-                        {UI[lang].handshakes.draftIntro} →
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+            <button
+              onClick={() => {
+                setSpotlightId(null);
+                setSelectedAxis(null);
+                onClearFocusedResearcher();
+              }}
+              className="text-slate-400 hover:text-white cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
           </div>
         )}
 
-        {/* Selected Entity Node Inspector (Region / Hazard / Asset / Mission) */}
-        {selectedEntity && (
-          <div className="absolute bottom-3.5 right-3.5 w-80 max-h-72 overflow-y-auto rounded-xl bg-slate-950/92 backdrop-blur-md border border-slate-700 p-3.5 text-slate-100 shadow-2xl">
-            <div className="flex items-start justify-between gap-2 mb-2">
-              <div>
-                <div className="text-[10px] font-mono-code uppercase tracking-wider text-teal-400">
-                  {selectedEntity.kind}
-                </div>
-                <h4 className="font-display font-bold text-sm text-white leading-snug">
-                  {selectedEntity.label}
-                </h4>
-                {selectedEntity.sublabel && (
-                  <p className="text-[11px] text-slate-400">{selectedEntity.sublabel}</p>
-                )}
-              </div>
-              <button
-                onClick={() => setSelectedEntity(null)}
-                className="text-slate-400 hover:text-white cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="space-y-1.5 mt-2">
-              {selectedEntityMembers.map((m) => (
-                <button
-                  key={m.id}
-                  onClick={() => onSelectResearcher(m.id)}
-                  className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-left text-xs cursor-pointer"
-                >
-                  <span className="flex items-center gap-2 truncate">
-                    <span
-                      className="w-2 h-2 rounded-full shrink-0"
-                      style={{ backgroundColor: AXIS_MAP[m.primaryAxis].color }}
-                    />
-                    <span className="truncate font-medium text-slate-100">{m.name}</span>
-                  </span>
-                  <span className="font-mono-code text-[10px] text-slate-400 shrink-0">
-                    {AXIS_MAP[m.primaryAxis].code}
-                  </span>
-                </button>
-              ))}
-            </div>
+        {/* Bottom Visual Legend */}
+        <div className="absolute bottom-3.5 left-3.5 right-3.5 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
+          <div className="px-3.5 py-2 rounded-xl bg-slate-950/80 backdrop-blur-md border border-slate-800 text-[11px] text-slate-200 flex flex-wrap items-center gap-4">
+            <span className="flex items-center gap-1.5">
+              <span className="w-4 h-0.5 bg-[#2DD4BF] inline-block" />
+              🤝 {lang === 'pt' ? 'Coautoria / Projeto' : 'Co-authors'}
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="w-4 h-0 border-t-2 border-dashed border-[#34D399] inline-block" />
+              📍 {lang === 'pt' ? 'Mesmo Território' : 'Same Territory'}
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="w-4 h-0 border-t-2 border-dashed border-[#FBBF24] inline-block" />
+              🔗 {lang === 'pt' ? 'Oferta ↔ Demanda' : 'Offer ↔ Need'}
+            </span>
           </div>
-        )}
 
-        {/* Crisp Floating Hover Tooltip */}
+          <div className="px-3 py-1.5 rounded-xl bg-slate-950/75 border border-slate-800 text-[11px] text-slate-400 hidden md:block">
+            {t.clickHint}
+          </div>
+        </div>
+
+        {/* Hover Card */}
         {hoveredNode && !dragNodeRef.current && (
           <div
-            className="pointer-events-none absolute z-20 max-w-xs px-3 py-2.5 rounded-xl bg-slate-950/92 backdrop-blur-md border border-slate-700/90 shadow-2xl text-xs text-slate-100"
+            className="pointer-events-none absolute z-20 max-w-xs px-3 py-2 rounded-xl bg-slate-950/95 border border-slate-700 shadow-2xl text-xs text-white"
             style={{
-              left: Math.min(dimensions.width - 250, Math.max(12, hoveredNode.sx + 16)),
-              top: Math.min(dimensions.height - 130, Math.max(12, hoveredNode.sy - 12)),
+              left: Math.min(dimensions.width - 230, Math.max(12, hoveredNode.sx + 14)),
+              top: Math.min(dimensions.height - 95, Math.max(12, hoveredNode.sy - 10)),
             }}
           >
             {hoveredNode.node.kind === 'researcher' && hoveredNode.node.researcher ? (
               <>
-                <div className="flex items-center gap-1.5 mb-1">
+                <div className="flex items-center gap-1.5 mb-0.5">
                   <span
-                    className="px-1.5 py-0.5 rounded text-[10px] font-mono-code font-bold text-white"
+                    className="px-1.5 py-0.2 rounded text-[10px] font-mono-code font-bold text-white"
                     style={{ backgroundColor: hoveredNode.node.color }}
                   >
                     {AXIS_MAP[hoveredNode.node.researcher.primaryAxis].code}
                   </span>
                   <span className="text-[10px] text-slate-400">
-                    {ROLE_LABELS[hoveredNode.node.researcher.role][lang]}
+                    {ROLE_LABELS[hoveredNode.node.researcher.role][lang === 'pt' ? 'shortPt' : 'shortEn']}
                   </span>
                 </div>
-                <div className="font-display font-bold text-sm text-white">
-                  {hoveredNode.node.researcher.name}
-                </div>
+                <div className="font-display font-bold text-sm">{hoveredNode.node.label}</div>
                 <div className="text-[11px] text-slate-300">
-                  {hoveredNode.node.researcher.unit} • {hoveredNode.node.researcher.city}
-                </div>
-                <div className="flex items-center gap-2 mt-1.5 text-[10px] text-teal-300">
-                  <span>{hoveredNode.node.researcher.offers.length} {UI[lang].directory.offersCount}</span>
-                  <span>•</span>
-                  <span className="text-amber-300">
-                    {hoveredNode.node.researcher.needs.length} {UI[lang].directory.needsCount}
-                  </span>
+                  {hoveredNode.node.researcher.unit}
                 </div>
               </>
             ) : (
               <>
-                <div className="font-bold text-white">{hoveredNode.node.label}</div>
-                {hoveredNode.node.sublabel && (
-                  <div className="text-[11px] text-slate-400">{hoveredNode.node.sublabel}</div>
-                )}
+                <div className="font-mono-code font-bold" style={{ color: hoveredNode.node.color }}>
+                  {hoveredNode.node.label}
+                </div>
+                <div className="font-bold">{hoveredNode.node.sublabel}</div>
               </>
             )}
           </div>

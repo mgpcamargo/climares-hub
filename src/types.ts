@@ -61,7 +61,7 @@ export interface CapabilityItem {
   domain: CapabilityDomain;
   label: TextValue;
   detail?: TextValue;
-  scale?: string; // e.g. "0.1° diário", "Municipal SP", "Bacia"
+  scale?: string;
 }
 
 export interface Publication {
@@ -82,6 +82,7 @@ export interface Researcher {
   city: string;
   primaryAxis: AxisId;
   secondaryAxes: AxisId[];
+  photoUrl?: string;
   bio: TextValue;
   email?: string;
   orcid?: string;
@@ -90,14 +91,12 @@ export interface Researcher {
   githubUrl?: string;
   bvFapespUrl?: string;
   methods: string[];
-  regions: string[]; // Region IDs
-  hazards: string[]; // Hazard IDs
+  regions: string[];
+  hazards: string[];
   offers: CapabilityItem[];
   needs: CapabilityItem[];
   availability: AvailabilityTag[];
   publications: Publication[];
-  /** True for representative postdoc/PhD demo profiles so users clearly distinguish public PIs from seeded ECR examples */
-  isDemoProfile?: boolean;
 }
 
 export type EdgeKind = 'coauthored' | 'project' | 'supervision';
@@ -107,7 +106,7 @@ export interface CollaborationEdge {
   source: string;
   target: string;
   kind: EdgeKind;
-  weight: number; // 1..5
+  weight: number;
   label: TextValue;
   year?: number;
 }
@@ -115,6 +114,8 @@ export interface CollaborationEdge {
 export interface StudyRegion {
   id: string;
   name: Localized;
+  shortName: Localized;
+  emoji: string;
   state: string;
   biome: Localized;
   lat: number;
@@ -126,46 +127,14 @@ export interface Hazard {
   id: string;
   name: Localized;
   shortName: Localized;
+  emoji: string;
   color: string;
-}
-
-export type AssetKind = 'dataset' | 'tool' | 'model' | 'protocol' | 'policy_brief';
-
-export interface CommonsAsset {
-  id: string;
-  name: string;
-  kind: AssetKind;
-  description: TextValue;
-  axisId: AxisId;
-  maintainerIds: string[];
-  regions: string[];
-  hazards: string[];
-  domain: CapabilityDomain;
-  format: string;
-  access: 'open' | 'internal' | 'request';
-  url?: string;
-  usedByAxes: AxisId[];
-  neededByAxes: AxisId[];
-}
-
-export interface CrossAxisMission {
-  id: string;
-  title: TextValue;
-  summary: TextValue;
-  status: 'active' | 'forming' | 'urgent';
-  leadId: string;
-  memberIds: string[];
-  activeAxes: AxisId[];
-  openAxes: AxisId[]; // Explicitly missing axes!
-  regions: string[];
-  hazards: string[];
-  targetOutput: TextValue;
-  deadline?: string;
 }
 
 export interface BridgeReason {
   type: 'handshake' | 'region' | 'hazard' | 'method' | 'secondary_axis';
   text: Localized;
+  shortTag: Localized;
   weight: number;
 }
 
@@ -175,7 +144,7 @@ export interface LatentBridge {
   targetId: string;
   sourceAxis: AxisId;
   targetAxis: AxisId;
-  score: number; // 0..100
+  score: number;
   reasons: BridgeReason[];
   sharedRegions: string[];
   sharedHazards: string[];
@@ -200,10 +169,38 @@ export interface HandshakeMatch {
   crossAxis: boolean;
 }
 
-export type HubView =
-  | 'graph'
-  | 'constellation'
-  | 'handshakes'
-  | 'map'
-  | 'directory'
-  | 'missions';
+export type ForumFolderId =
+  | 'general'
+  | 'admin'
+  | 'axis-1'
+  | 'axis-2'
+  | 'axis-3'
+  | 'axis-4'
+  | 'axis-5'
+  | 'axis-6'
+  | 'axis-7'
+  | 'axis-8'
+  | 'axis-9'
+  | 'axis-10'
+  | 'axis-11';
+
+export interface ForumReply {
+  id: string;
+  authorId: string;
+  createdAt: string;
+  body: string;
+}
+
+export interface ForumThread {
+  id: string;
+  folderId: ForumFolderId;
+  title: string;
+  authorId: string;
+  createdAt: string;
+  body: string;
+  tags: string[];
+  pinned?: boolean;
+  replies: ForumReply[];
+}
+
+export type HubView = 'people' | 'graph' | 'map' | 'handshakes' | 'forum';
