@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Building2, ExternalLink, Search, X } from 'lucide-react';
+import { BookOpen, Building2, CheckCircle2, Search, X } from 'lucide-react';
 import { AXES, AXIS_MAP } from '../data/axes';
 import { REGION_MAP } from '../data/regionsAndHazards';
 import { ROLE_LABELS, UI } from '../i18n';
@@ -13,6 +13,11 @@ interface DirectoryViewProps {
 }
 
 type RoleGroup = 'all' | 'leads' | 'associates' | 'fellows';
+
+function formatCompact(n: number): string {
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
 
 export const DirectoryView: React.FC<DirectoryViewProps> = ({
   researchers,
@@ -47,11 +52,7 @@ export const DirectoryView: React.FC<DirectoryViewProps> = ({
       .trim();
 
     return researchers.filter((r) => {
-      if (
-        axisFilter !== 'all' &&
-        r.primaryAxis !== axisFilter &&
-        !r.secondaryAxes.includes(axisFilter)
-      ) {
+      if (axisFilter !== 'all' && r.primaryAxis !== axisFilter) {
         return false;
       }
       if (instFilter !== 'all' && r.institution !== instFilter) return false;
@@ -70,7 +71,9 @@ export const DirectoryView: React.FC<DirectoryViewProps> = ({
           r.institution,
           r.unit,
           r.city,
+          ...(r.empiricalTopics || []),
           ...r.methods,
+          ...r.publications.map((p) => p.title),
           ...r.regions.map((id) => REGION_MAP[id]?.shortName[lang] || id),
         ]
           .join(' ')
@@ -194,11 +197,15 @@ export const DirectoryView: React.FC<DirectoryViewProps> = ({
         </div>
       </div>
 
-      {/* Visual Photo Grid of Researchers */}
+      {/* Visual Photo & Bibliometric Card Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3.5">
         {filteredPeople.map((r) => {
           const ax = AXIS_MAP[r.primaryAxis];
           const isLead = r.role === 'coordinator' || r.role === 'pi';
+          const displayTopics =
+            r.empiricalTopics && r.empiricalTopics.length > 0
+              ? r.empiricalTopics.slice(0, 2)
+              : r.methods.slice(0, 2);
 
           return (
             <div
@@ -206,7 +213,6 @@ export const DirectoryView: React.FC<DirectoryViewProps> = ({
               onClick={() => onSelectResearcher(r.id)}
               className="group bg-white dark:bg-[#121C26] rounded-2xl border border-slate-200/80 dark:border-slate-800/90 hover:border-teal-500 dark:hover:border-teal-400 transition-all p-4 cursor-pointer flex flex-col justify-between relative overflow-hidden shadow-2xs hover:shadow-md"
             >
-              {/* Top Axis Color Accent */}
               <div
                 className="absolute top-0 left-0 right-0 h-1"
                 style={{ backgroundColor: ax.color }}
@@ -232,6 +238,12 @@ export const DirectoryView: React.FC<DirectoryViewProps> = ({
                       >
                         {ROLE_LABELS[r.role][lang === 'pt' ? 'shortPt' : 'shortEn']}
                       </span>
+                      {r.openalexId && (
+                        <CheckCircle2
+                          className="w-3.5 h-3.5 text-teal-500 shrink-0"
+                          aria-label={t.verifiedBadge}
+                        />
+                      )}
                     </div>
                     <h3 className="font-display font-bold text-sm text-slate-900 dark:text-white group-hover:text-teal-600 dark:group-hover:text-teal-400 leading-snug truncate">
                       {r.name}
@@ -243,54 +255,51 @@ export const DirectoryView: React.FC<DirectoryViewProps> = ({
                   </div>
                 </div>
 
-                {/* Visual Tags: Regions + Methods (Zero wall of text!) */}
+                {/* Empirical OpenAlex Topics + Territory Badges */}
                 <div className="flex flex-wrap gap-1 mt-3">
-                  {r.regions.slice(0, 2).map((rid) => {
+                  {displayTopics.map((tp) => (
+                    <span
+                      key={tp}
+                      className="text-[10px] font-medium px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800/90 text-slate-700 dark:text-slate-300 truncate max-w-[200px]"
+                    >
+                      {tp}
+                    </span>
+                  ))}
+                  {r.regions.slice(0, 1).map((rid) => {
                     const reg = REGION_MAP[rid];
+                    if (!reg) return null;
                     return (
                       <span
                         key={rid}
-                        className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-teal-500/10 text-teal-800 dark:text-teal-300 border border-teal-500/20"
+                        className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-teal-500/10 text-teal-700 dark:text-teal-300 border border-teal-500/20"
                       >
-                        {reg ? `${reg.emoji} ${reg.shortName[lang]}` : rid}
+                        {reg.emoji} {reg.shortName[lang]}
                       </span>
                     );
                   })}
-                  {r.methods.slice(0, 2).map((m) => (
-                    <span
-                      key={m}
-                      className="text-[10px] font-mono-code px-1.5 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800/90 text-slate-600 dark:text-slate-300"
-                    >
-                      {m}
-                    </span>
-                  ))}
                 </div>
               </div>
 
-              {/* Footer: Secondary Axes + Direct Lattes Icon */}
+              {/* Footer: Real Bibliometric Counts */}
               <div className="mt-3.5 pt-2.5 border-t border-slate-100 dark:border-slate-800/80 flex items-center justify-between text-[11px]">
-                <div className="flex items-center gap-1">
-                  <span
-                    className="text-[10px] font-semibold truncate max-w-[165px]"
-                    style={{ color: ax.color }}
-                  >
-                    {ax.shortName[lang]}
-                  </span>
-                  {r.secondaryAxes.slice(0, 2).map((sid) => (
-                    <span
-                      key={sid}
-                      className="w-4 h-4 rounded-full text-[8px] font-mono-code font-bold text-white flex items-center justify-center"
-                      style={{ backgroundColor: AXIS_MAP[sid].color }}
-                      title={AXIS_MAP[sid].name[lang]}
-                    >
-                      {sid}
-                    </span>
-                  ))}
-                </div>
-                <span className="inline-flex items-center gap-1 font-semibold text-slate-500 dark:text-slate-400 group-hover:text-teal-500">
-                  <span>{lang === 'pt' ? 'Currículo' : 'Profile'}</span>
-                  <ExternalLink className="w-3 h-3" />
+                <span
+                  className="text-[10px] font-bold truncate max-w-[145px]"
+                  style={{ color: ax.color }}
+                >
+                  {ax.shortName[lang]}
                 </span>
+
+                {r.worksCount ? (
+                  <span className="inline-flex items-center gap-1 text-[10px] font-mono-code text-slate-500 dark:text-slate-400">
+                    <BookOpen className="w-3 h-3 text-teal-500" />
+                    <strong>{formatCompact(r.worksCount)}</strong> {t.worksLabel}
+                    {r.citedByCount ? ` • ${formatCompact(r.citedByCount)} cit.` : ''}
+                  </span>
+                ) : (
+                  <span className="text-[10px] font-semibold text-slate-400 group-hover:text-teal-400">
+                    {lang === 'pt' ? 'Ver perfil →' : 'View profile →'}
+                  </span>
+                )}
               </div>
             </div>
           );

@@ -1,102 +1,28 @@
 import { AXIS_MAP } from '../data/axes';
-import { HAZARD_MAP, REGION_MAP } from '../data/regionsAndHazards';
-import { DOMAIN_LABELS, tText } from '../i18n';
+import { REGION_MAP } from '../data/regionsAndHazards';
 import {
   BridgeReason,
-  CapabilityItem,
   CollaborationEdge,
-  HandshakeMatch,
   Lang,
   LatentBridge,
   Researcher,
 } from '../types';
 
-function tokenize(text: string): Set<string> {
-  return new Set(
-    text
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9\s]/g, ' ')
-      .split(/\s+/)
-      .filter((w) => w.length >= 4)
-  );
-}
-
-function jaccardTokens(a: Set<string>, b: Set<string>): number {
-  if (a.size === 0 || b.size === 0) return 0;
-  let inter = 0;
-  for (const x of a) {
-    if (b.has(x)) inter++;
-  }
-  const union = a.size + b.size - inter;
-  return union === 0 ? 0 : inter / union;
-}
-
-function capabilityMatchScore(
-  offer: CapabilityItem,
-  need: CapabilityItem,
-  sharedRegions: string[],
-  sharedHazards: string[]
-): number {
-  if (offer.domain !== need.domain) {
-    const tA = tokenize(`${tText(offer.label, 'pt')} ${tText(offer.detail, 'pt')}`);
-    const tB = tokenize(`${tText(need.label, 'pt')} ${tText(need.detail, 'pt')}`);
-    const jac = jaccardTokens(tA, tB);
-    if (jac < 0.22) return 0;
-    return Math.min(82, Math.round(42 + jac * 65 + sharedRegions.length * 7 + sharedHazards.length * 5));
-  }
-
-  const tA = tokenize(`${tText(offer.label, 'pt')} ${tText(offer.detail, 'pt')}`);
-  const tB = tokenize(`${tText(need.label, 'pt')} ${tText(need.detail, 'pt')}`);
-  const jac = jaccardTokens(tA, tB);
-  const base = 62;
-  const textBonus = Math.min(18, Math.round(jac * 60));
-  const regionBonus = Math.min(14, sharedRegions.length * 7);
-  const hazardBonus = Math.min(10, sharedHazards.length * 5);
-  return Math.min(99, base + textBonus + regionBonus + hazardBonus);
-}
-
-export function computeHandshakes(researchers: Researcher[]): HandshakeMatch[] {
-  const matches: HandshakeMatch[] = [];
-
-  for (const provider of researchers) {
-    if (!provider.offers.length) continue;
-    for (const seeker of researchers) {
-      if (provider.id === seeker.id || !seeker.needs.length) continue;
-
-      const sharedRegions = provider.regions.filter((r) => seeker.regions.includes(r));
-      const sharedHazards = provider.hazards.filter((h) => seeker.hazards.includes(h));
-
-      for (const offer of provider.offers) {
-        for (const need of seeker.needs) {
-          const score = capabilityMatchScore(offer, need, sharedRegions, sharedHazards);
-          if (score >= 62) {
-            matches.push({
-              id: `hs-${provider.id}-${offer.id}-${seeker.id}-${need.id}`,
-              provider,
-              seeker,
-              offer,
-              need,
-              score,
-              sharedRegions,
-              sharedHazards,
-              crossAxis: provider.primaryAxis !== seeker.primaryAxis,
-            });
-          }
-        }
-      }
+function normTokens(items: string[]): Set<string> {
+  const stop = new Set(['and', 'the', 'for', 'with', 'from', 'in', 'of', 'over', 'change', 'changes', 'study', 'studies', 'analysis', 'science', 'sciences']);
+  const out = new Set<string>();
+  for (const item of items) {
+    for (const tok of item.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)) {
+      if (tok.length >= 4 && !stop.has(tok)) out.add(tok);
     }
   }
-
-  // Prioritize PIs/Coordinator and cross-axis matches with shared regions
-  return matches.sort((a, b) => {
-    const leadA = (a.provider.role === 'pi' || a.provider.role === 'coordinator' ? 4 : 0) + (a.seeker.role === 'pi' ? 4 : 0);
-    const leadB = (b.provider.role === 'pi' || b.provider.role === 'coordinator' ? 4 : 0) + (b.seeker.role === 'pi' ? 4 : 0);
-    return b.score + leadB - (a.score + leadA);
-  });
+  return out;
 }
 
+/**
+ * Computes potential cross-axis bridges grounded in empirical OpenAlex topics,
+ * publication titles, and verified territories (only for pairs NOT yet co-authoring!).
+ */
 export function computeLatentBridges(
   researchers: Researcher[],
   edges: CollaborationEdge[]
@@ -107,118 +33,117 @@ export function computeLatentBridges(
     edgeSet.add(`${e.target}::${e.source}`);
   }
 
+  // Precompute topic sets & normalized paper tokens per researcher
+  const exactTopics = new Map<string, string[]>();
+  const topicWords = new Map<string, Set<string>>();
+
+  for (const r of researchers) {
+    const tList = r.empiricalTopics && r.empiricalTopics.length > 0 ? r.empiricalTopics : r.methods;
+    exactTopics.set(r.id, tList);
+    const pubTitles = r.publications.map((p) => p.title);
+    topicWords.set(r.id, normTokens([...tList, ...pubTitles]));
+  }
+
   const bridges: LatentBridge[] = [];
 
   for (let i = 0; i < researchers.length; i++) {
     const a = researchers[i];
+    if (a.role === 'tech' || a.role === 'ic') continue;
+
     for (let j = i + 1; j < researchers.length; j++) {
       const b = researchers[j];
+      if (b.role === 'tech' || b.role === 'ic') continue;
       if (a.primaryAxis === b.primaryAxis) continue;
 
-      const sharedRegions = a.regions.filter((r) => b.regions.includes(r));
-      const sharedHazards = a.hazards.filter((h) => b.hazards.includes(h));
+      const alreadyConnected = edgeSet.has(`${a.id}::${b.id}`);
+      if (alreadyConnected) continue; // Only surface NEW untapped cross-axis bridges!
 
-      const matchedHandshakes: LatentBridge['matchedHandshakes'] = [];
-      let handshakePts = 0;
-      let aToB = false;
-      let bToA = false;
+      const tA = exactTopics.get(a.id) || [];
+      const tB = exactTopics.get(b.id) || [];
+      const sharedExactTopics = tA.filter((x) =>
+        tB.some((y) => y.toLowerCase() === x.toLowerCase())
+      );
 
-      for (const off of a.offers) {
-        for (const nd of b.needs) {
-          const s = capabilityMatchScore(off, nd, sharedRegions, sharedHazards);
-          if (s >= 62) {
-            matchedHandshakes.push({ providerId: a.id, seekerId: b.id, offer: off, need: nd });
-            aToB = true;
-          }
+      // Semantic word overlap across OpenAlex topics + recent paper titles
+      const wA = topicWords.get(a.id)!;
+      const wB = topicWords.get(b.id)!;
+      let sharedWordCount = 0;
+      const sampleWords: string[] = [];
+      for (const w of wA) {
+        if (wB.has(w)) {
+          sharedWordCount++;
+          if (sampleWords.length < 3) sampleWords.push(w);
         }
       }
-      for (const off of b.offers) {
-        for (const nd of a.needs) {
-          const s = capabilityMatchScore(off, nd, sharedRegions, sharedHazards);
-          if (s >= 62) {
-            matchedHandshakes.push({ providerId: b.id, seekerId: a.id, offer: off, need: nd });
-            bToA = true;
-          }
-        }
-      }
+
+      const sharedRegions = a.regions.filter((reg) => b.regions.includes(reg));
 
       const reasons: BridgeReason[] = [];
+      let score = 0;
 
-      if (matchedHandshakes.length > 0) {
-        handshakePts = aToB && bToA ? 46 : 34;
-        const first = matchedHandshakes[0];
-        const dom = DOMAIN_LABELS[first.offer.domain];
+      if (sharedExactTopics.length > 0) {
+        const pts = Math.min(54, 34 + (sharedExactTopics.length - 1) * 12);
+        score += pts;
+        const firstTopic = sharedExactTopics[0];
         reasons.push({
-          type: 'handshake',
-          weight: handshakePts,
+          type: 'topic',
+          weight: pts,
           shortTag: {
-            pt: `${dom.emoji} ${dom.pt}`,
-            en: `${dom.emoji} ${dom.en}`,
+            pt: `🧬 ${firstTopic}`,
+            en: `🧬 ${firstTopic}`,
           },
           text: {
-            pt: `Oferta ↔ Demanda em ${dom.pt}`,
-            en: `Offer ↔ Need in ${dom.en}`,
+            pt: `Publicam sobre o mesmo tema OpenAlex: ${sharedExactTopics.slice(0, 2).join(', ')}`,
+            en: `Publish on the same OpenAlex topic: ${sharedExactTopics.slice(0, 2).join(', ')}`,
+          },
+        });
+      } else if (sharedWordCount >= 3) {
+        const pts = Math.min(40, 18 + sharedWordCount * 4);
+        score += pts;
+        reasons.push({
+          type: 'topic',
+          weight: pts,
+          shortTag: {
+            pt: `🧬 ${sampleWords.slice(0, 2).join(' • ')}`,
+            en: `🧬 ${sampleWords.slice(0, 2).join(' • ')}`,
+          },
+          text: {
+            pt: ` Artigos recentes com termos convergentes (${sampleWords.join(', ')})`,
+            en: `Recent papers share core terms (${sampleWords.join(', ')})`,
           },
         });
       }
 
-      const regionPts = Math.min(28, sharedRegions.length * 14);
       if (sharedRegions.length > 0) {
-        const firstReg = REGION_MAP[sharedRegions[0]];
-        const namesPt = sharedRegions.slice(0, 2).map((id) => REGION_MAP[id]?.shortName.pt || id).join(', ');
-        const namesEn = sharedRegions.slice(0, 2).map((id) => REGION_MAP[id]?.shortName.en || id).join(', ');
+        const pts = Math.min(26, sharedRegions.length * 13);
+        score += pts;
+        const reg = REGION_MAP[sharedRegions[0]];
         reasons.push({
           type: 'region',
-          weight: regionPts,
+          weight: pts,
           shortTag: {
-            pt: `${firstReg?.emoji || '📍'} ${firstReg?.shortName.pt || sharedRegions[0]}`,
-            en: `${firstReg?.emoji || '📍'} ${firstReg?.shortName.en || sharedRegions[0]}`,
+            pt: `${reg?.emoji || '📍'} ${reg?.shortName.pt || sharedRegions[0]}`,
+            en: `${reg?.emoji || '📍'} ${reg?.shortName.en || sharedRegions[0]}`,
           },
           text: {
-            pt: `Atuam em ${namesPt}`,
-            en: `Both work in ${namesEn}`,
+            pt: `Atuação convergente em ${sharedRegions.map((id) => REGION_MAP[id]?.shortName.pt || id).slice(0, 2).join(', ')}`,
+            en: `Shared regional focus in ${sharedRegions.map((id) => REGION_MAP[id]?.shortName.en || id).slice(0, 2).join(', ')}`,
           },
         });
       }
 
-      const hazardPts = Math.min(20, sharedHazards.length * 10);
-      if (sharedHazards.length > 0) {
-        const firstHaz = HAZARD_MAP[sharedHazards[0]];
-        const hPt = sharedHazards.slice(0, 2).map((id) => HAZARD_MAP[id]?.shortName.pt || id).join(' & ');
-        const hEn = sharedHazards.slice(0, 2).map((id) => HAZARD_MAP[id]?.shortName.en || id).join(' & ');
-        reasons.push({
-          type: 'hazard',
-          weight: hazardPts,
-          shortTag: {
-            pt: `${firstHaz?.emoji || '⚡'} ${firstHaz?.shortName.pt || sharedHazards[0]}`,
-            en: `${firstHaz?.emoji || '⚡'} ${firstHaz?.shortName.en || sharedHazards[0]}`,
-          },
-          text: {
-            pt: `Foco em ${hPt}`,
-            en: `Focus on ${hEn}`,
-          },
-        });
-      }
-
-      const secAffinity =
-        a.secondaryAxes.includes(b.primaryAxis) || b.secondaryAxes.includes(a.primaryAxis);
-      const secPts = secAffinity ? 10 : 0;
-
-      const totalScore = Math.min(99, handshakePts + regionPts + hazardPts + secPts);
-
-      if (totalScore >= 52 && reasons.length > 0) {
+      if (score >= 46 && reasons.length > 0) {
         bridges.push({
           id: `br-${a.id}--${b.id}`,
           sourceId: a.id,
           targetId: b.id,
           sourceAxis: a.primaryAxis,
           targetAxis: b.primaryAxis,
-          score: totalScore,
+          score: Math.min(98, score),
           reasons: reasons.sort((x, y) => y.weight - x.weight),
+          sharedTopics: sharedExactTopics.length ? sharedExactTopics : sampleWords,
           sharedRegions,
-          sharedHazards,
-          matchedHandshakes,
-          alreadyConnected: edgeSet.has(`${a.id}::${b.id}`),
+          alreadyConnected: false,
         });
       }
     }
@@ -241,6 +166,19 @@ export function getBridgesForResearcher(
     }));
 }
 
+export function getCoauthorsForResearcher(
+  researcherId: string,
+  edges: CollaborationEdge[]
+): { edge: CollaborationEdge; partnerId: string }[] {
+  return edges
+    .filter((e) => e.source === researcherId || e.target === researcherId)
+    .sort((a, b) => (b.paperCount || b.weight) - (a.paperCount || a.weight))
+    .map((edge) => ({
+      edge,
+      partnerId: edge.source === researcherId ? edge.target : edge.source,
+    }));
+}
+
 export function generateWarmIntro(
   from: Researcher | null,
   to: Researcher,
@@ -251,31 +189,32 @@ export function generateWarmIntro(
   const fromAxis = from ? AXIS_MAP[from.primaryAxis] : null;
   const firstNameTo = to.name.split(' ')[0];
   const senderName = from ? from.name : lang === 'pt' ? '[Seu Nome]' : '[Your Name]';
-  const senderUnit = from ? `${from.unit} (Eixo ${from.primaryAxis})` : 'CLIMARES';
+  const senderUnit = from ? `${from.unit} (Eixo ${from.primaryAxis})` : 'CEPID CLIMARES';
 
   const overlapLines: string[] = [];
   if (bridge) {
     for (const r of bridge.reasons.slice(0, 2)) {
-      overlapLines.push(`• ${r.text[lang]}`);
+      overlapLines.push(`• ${r.text[lang].trim()}`);
     }
-  } else if (to.regions.length > 0) {
-    const reg = REGION_MAP[to.regions[0]]?.shortName[lang];
-    if (reg) {
-      overlapLines.push(lang === 'pt' ? `• Atuação em ${reg}` : `• Focus in ${reg}`);
-    }
+  } else if (to.empiricalTopics && to.empiricalTopics.length > 0) {
+    overlapLines.push(
+      lang === 'pt'
+        ? `• Interesse convergente em ${to.empiricalTopics.slice(0, 2).join(' e ')}`
+        : `• Shared interest in ${to.empiricalTopics.slice(0, 2).join(' & ')}`
+    );
   }
 
   if (lang === 'pt') {
     const subject = fromAxis
-      ? `[CLIMARES] Conexão Eixo ${fromAxis.id} ↔ Eixo ${toAxis.id}`
-      : `[CLIMARES] Parceria com o Eixo ${toAxis.id}`;
+      ? `[CLIMARES] Ponte Eixo ${fromAxis.id} ↔ Eixo ${toAxis.id}`
+      : `[CLIMARES] Colaboração com o Eixo ${toAxis.id}`;
     const body = `Olá ${firstNameTo}, tudo bem?
 
-Sou ${senderName} (${senderUnit}) do CEPID CLIMARES. Vi seu perfil no CLIMARES Hub e notei que temos pontos diretos de conexão com o Eixo ${toAxis.id} (${toAxis.shortName.pt}):
+Sou ${senderName} (${senderUnit}). Vi suas publicações e linha de atuação no CLIMARES Hub e notei convergência direta com o Eixo ${toAxis.id} (${toAxis.shortName.pt}):
 
-${overlapLines.length ? overlapLines.join('\n') : '• Pesquisa integrada no CLIMARES'}
+${overlapLines.length ? overlapLines.join('\n') : '• Pesquisa interdisciplinar no CEPID CLIMARES'}
 
-Podemos conversar rapidamente nos próximos dias sobre uma possível parceria ou troca de dados?
+Podemos conversar rapidamente nos próximos dias sobre troca de dados ou possível parceria?
 
 Abraço,
 ${senderName}`;
@@ -283,15 +222,15 @@ ${senderName}`;
   }
 
   const subject = fromAxis
-    ? `[CLIMARES] Axis ${fromAxis.id} ↔ Axis ${toAxis.id} Connection`
+    ? `[CLIMARES] Axis ${fromAxis.id} ↔ Axis ${toAxis.id} Collaboration`
     : `[CLIMARES] Collaboration with Axis ${toAxis.id}`;
   const body = `Hi ${firstNameTo},
 
-I'm ${senderName} (${senderUnit}) at CEPID CLIMARES. I saw your profile on the CLIMARES Hub and noticed direct overlap with Axis ${toAxis.id} (${toAxis.shortName.en}):
+I'm ${senderName} (${senderUnit}). Seeing your publications on the CLIMARES Hub, I noticed strong overlap with Axis ${toAxis.id} (${toAxis.shortName.en}):
 
-${overlapLines.length ? overlapLines.join('\n') : '• Shared research across CLIMARES'}
+${overlapLines.length ? overlapLines.join('\n') : '• Interdisciplinary collaboration across CLIMARES'}
 
-Would you be open to a quick chat about exchanging data or collaborating?
+Would you be open to a brief chat about exchanging data or collaborating?
 
 Best,
 ${senderName}`;

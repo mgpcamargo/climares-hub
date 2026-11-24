@@ -12,10 +12,9 @@ import {
 } from 'd3-force';
 import { select } from 'd3-selection';
 import { zoom, zoomIdentity, ZoomTransform } from 'd3-zoom';
-import { RotateCcw, Search, X } from 'lucide-react';
+import { ArrowLeft, Search, X } from 'lucide-react';
 import { AXES, AXIS_MAP } from '../data/axes';
-import { REGION_MAP } from '../data/regionsAndHazards';
-import { DOMAIN_LABELS, ROLE_LABELS, UI } from '../i18n';
+import { ROLE_LABELS, UI } from '../i18n';
 import {
   AxisId,
   CollaborationEdge,
@@ -24,13 +23,14 @@ import {
   Researcher,
 } from '../types';
 
-export type ConnectionMode = 'all' | 'coauthor' | 'territory' | 'topic';
+export type EdgeMode = 'all' | 'coauthor' | 'topic';
 
 interface GraphNode extends SimulationNodeDatum {
   id: string;
-  kind: 'axis_hub' | 'researcher';
+  kind: 'axis_bubble' | 'researcher';
   label: string;
   sublabel: string;
+  countLabel?: string;
   color: string;
   radius: number;
   axisId: AxisId;
@@ -41,8 +41,10 @@ interface GraphLink extends SimulationLinkDatum<GraphNode> {
   id: string;
   source: string | GraphNode;
   target: string | GraphNode;
-  kind: 'hub_tether' | 'coauthor' | 'territory' | 'topic';
+  kind: 'coauthor' | 'topic';
+  weight: number;
   tag: string;
+  detail?: string;
   color: string;
 }
 
@@ -56,11 +58,11 @@ interface NetworkGraphViewProps {
   onSelectResearcher: (id: string) => void;
 }
 
-function getAxisHubPosition(axisId: AxisId, w: number, h: number): { x: number; y: number } {
+function getMacroPos(axisId: AxisId, w: number, h: number): { x: number; y: number } {
   const cx = w / 2;
   const cy = h / 2;
-  const rx = Math.min(w, h) * 0.34;
-  const ry = Math.min(w, h) * 0.33;
+  const rx = Math.min(w, h) * 0.35;
+  const ry = Math.min(w, h) * 0.34;
   const angle = ((axisId - 1) / 11) * Math.PI * 2 - Math.PI / 2;
   return {
     x: cx + Math.cos(angle) * rx,
@@ -81,13 +83,16 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const [dimensions, setDimensions] = useState({ width: 1100, height: 660 });
-  const [mode, setMode] = useState<ConnectionMode>('all');
-  const [selectedAxis, setSelectedAxis] = useState<AxisId | null>(null);
+  const [dimensions, setDimensions] = useState({ width: 1100, height: 650 });
+  const [expandedAxes, setExpandedAxes] = useState<AxisId[]>([]);
+  const [egoId, setEgoId] = useState<string | null>(focusedResearcherId);
+  const [edgeMode, setEdgeMode] = useState<EdgeMode>('all');
   const [searchQuery, setSearchQuery] = useState('');
-  const [spotlightId, setSpotlightId] = useState<string | null>(focusedResearcherId);
-  const [hoveredNode, setHoveredNode] = useState<{
-    node: GraphNode;
+  const [hoveredInfo, setHoveredInfo] = useState<{
+    title: string;
+    subtitle: string;
+    extra?: string;
+    color: string;
     sx: number;
     sy: number;
   } | null>(null);
@@ -96,19 +101,20 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
   const zoomBehaviorRef = useRef<ReturnType<typeof zoom<HTMLCanvasElement, unknown>> | null>(
     null
   );
-  const nodesRef = useRef<GraphNode[]>([]);
-  const hoveredIdRef = useRef<string | null>(null);
   const simRef = useRef<Simulation<GraphNode, GraphLink> | null>(null);
+  const hoveredIdRef = useRef<string | null>(null);
   const dragNodeRef = useRef<GraphNode | null>(null);
   const imageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
 
+  // When a researcher is focused from the Drawer or Search, enter Ego Expansion!
   useEffect(() => {
     if (focusedResearcherId) {
-      setSpotlightId(focusedResearcherId);
+      setEgoId(focusedResearcherId);
+      const r = researchers.find((x) => x.id === focusedResearcherId);
+      if (r) setExpandedAxes([r.primaryAxis]);
     }
-  }, [focusedResearcherId]);
+  }, [focusedResearcherId, researchers]);
 
-  // Preload available researcher photos for canvas rendering
   useEffect(() => {
     for (const r of researchers) {
       if (r.photoUrl && !imageCacheRef.current.has(r.id)) {
@@ -134,112 +140,182 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
     return () => ro.disconnect();
   }, []);
 
-  // Build ONE clear, intuitive graph: 11 Axis Hub nodes + Researcher nodes + 3 explicit connection types
-  const graphData = useMemo(() => {
-    const nodes: GraphNode[] = [];
-    const links: GraphLink[] = [];
+  const isMacro = expandedAxes.length === 0 && !egoId;
+  const rById = useMemo(() => new Map(researchers.map((r) => [r.id, r])), [researchers]);
 
-    // 1. Add the 11 Axis Hub Nodes
-    for (const ax of AXES) {
-      if (selectedAxis && ax.id !== selectedAxis) {
-        // Still keep all 11 hubs visible as anchors, or dim unselected
-      }
-      nodes.push({
-        id: `hub-${ax.id}`,
-        kind: 'axis_hub',
-        label: ax.code,
-        sublabel: ax.shortName[lang],
-        color: ax.color,
-        radius: 20,
-        axisId: ax.id,
+  // Build either MACRO (11 Axis Bubbles) or EXPANDED (Selected Axes / Ego Researchers)
+  const graphData = useMemo(() => {
+    if (isMacro) {
+      const counts = new Map<AxisId, number>();
+      for (const ax of AXES) counts.set(ax.id, 0);
+      for (const r of researchers) counts.set(r.primaryAxis, (counts.get(r.primaryAxis) || 0) + 1);
+
+      const nodes: GraphNode[] = AXES.map((ax) => {
+        const cnt = counts.get(ax.id) || 0;
+        return {
+          id: `ax-${ax.id}`,
+          kind: 'axis_bubble',
+          label: ax.code,
+          sublabel: ax.shortName[lang],
+          countLabel: `${cnt} ${lang === 'pt' ? 'membros' : 'members'}`,
+          color: ax.color,
+          radius: 24 + Math.min(20, Math.sqrt(cnt) * 3.2),
+          axisId: ax.id,
+        };
       });
+
+      const links: GraphLink[] = [];
+
+      // Aggregate real empirical cross-axis co-authored papers
+      if (edgeMode === 'all' || edgeMode === 'coauthor') {
+        const pairPapers = new Map<string, number>();
+        for (const e of edges) {
+          const a = rById.get(e.source);
+          const b = rById.get(e.target);
+          if (!a || !b || a.primaryAxis === b.primaryAxis) continue;
+          const k = [a.primaryAxis, b.primaryAxis].sort((x, y) => x - y).join('-');
+          pairPapers.set(k, (pairPapers.get(k) || 0) + (e.paperCount || 1));
+        }
+        for (const [k, cnt] of pairPapers.entries()) {
+          const [a1, a2] = k.split('-').map(Number);
+          links.push({
+            id: `mac-co-${k}`,
+            source: `ax-${a1}`,
+            target: `ax-${a2}`,
+            kind: 'coauthor',
+            weight: Math.min(7, 1.5 + Math.log2(cnt + 1) * 1.4),
+            tag: `${cnt} ${lang === 'pt' ? 'artigos juntos' : 'joint papers'}`,
+            color: '#2DD4BF',
+          });
+        }
+      }
+
+      // Aggregate untapped topic bridges between axes with 0 co-authored papers
+      if (edgeMode === 'all' || edgeMode === 'topic') {
+        const coSet = new Set(links.map((l) => `${l.source}--${l.target}`));
+        const pairBridges = new Map<string, { count: number; sampleTopic: string }>();
+        for (const br of bridges) {
+          if (br.score < 54) continue;
+          const [a1, a2] = [br.sourceAxis, br.targetAxis].sort((x, y) => x - y);
+          if (coSet.has(`ax-${a1}--ax-${a2}`)) continue;
+          const k = `${a1}-${a2}`;
+          const prev = pairBridges.get(k);
+          if (!prev) {
+            pairBridges.set(k, {
+              count: 1,
+              sampleTopic: br.reasons[0]?.shortTag[lang] || '',
+            });
+          } else {
+            prev.count++;
+          }
+        }
+        for (const [k, info] of pairBridges.entries()) {
+          if (info.count < 2) continue;
+          const [a1, a2] = k.split('-').map(Number);
+          links.push({
+            id: `mac-top-${k}`,
+            source: `ax-${a1}`,
+            target: `ax-${a2}`,
+            kind: 'topic',
+            weight: Math.min(3.2, 1 + info.count * 0.2),
+            tag: `${info.count} ${lang === 'pt' ? 'pontes temáticas' : 'topic bridges'}`,
+            detail: info.sampleTopic,
+            color: '#FBBF24',
+          });
+        }
+      }
+
+      return { nodes, links };
     }
 
-    // 2. Add Researcher Nodes ( tethered to their primary Axis hub )
-    const visibleIds = new Set<string>();
-    for (const r of researchers) {
+    // EXPANDED MODE: Show researchers in expandedAxes + their direct cross-axis co-authors / ego neighbors!
+    const includeIds = new Set<string>();
+    if (egoId && rById.has(egoId)) {
+      includeIds.add(egoId);
+      for (const e of edges) {
+        if (e.source === egoId) includeIds.add(e.target);
+        if (e.target === egoId) includeIds.add(e.source);
+      }
+      for (const b of bridges.filter((x) => x.sourceId === egoId || x.targetId === egoId).slice(0, 8)) {
+        includeIds.add(b.sourceId);
+        includeIds.add(b.targetId);
+      }
+    } else {
+      for (const r of researchers) {
+        if (expandedAxes.includes(r.primaryAxis)) {
+          includeIds.add(r.id);
+        }
+      }
+      // Also pull external cross-axis co-authors so bridges out of the expanded axis are visible!
+      if (expandedAxes.length === 1) {
+        for (const e of edges) {
+          const a = rById.get(e.source);
+          const b = rById.get(e.target);
+          if (!a || !b) continue;
+          if (a.primaryAxis === expandedAxes[0]) includeIds.add(b.id);
+          if (b.primaryAxis === expandedAxes[0]) includeIds.add(a.id);
+        }
+      }
+    }
+
+    const expResearchers = researchers.filter((r) => includeIds.has(r.id));
+    const nodes: GraphNode[] = expResearchers.map((r) => {
       const ax = AXIS_MAP[r.primaryAxis];
       const isLead = r.role === 'coordinator' || r.role === 'pi';
-      const hasPhoto = Boolean(r.photoUrl);
-      const radius = isLead ? 13 : hasPhoto ? 11 : 6.5;
-
-      visibleIds.add(r.id);
-      nodes.push({
+      const isCenterEgo = egoId === r.id;
+      return {
         id: r.id,
         kind: 'researcher',
         label: r.name,
         sublabel: `${ax.code} • ${r.unit}`,
+        countLabel: r.worksCount ? `${r.worksCount} art.` : undefined,
         color: ax.color,
-        radius,
+        radius: isCenterEgo ? 18 : isLead ? 15 : 10.5,
         axisId: r.primaryAxis,
         researcher: r,
-      });
+      };
+    });
 
-      links.push({
-        id: `tether-${r.id}`,
-        source: `hub-${r.primaryAxis}`,
-        target: r.id,
-        kind: 'hub_tether',
-        tag: ax.code,
-        color: ax.color,
-      });
-    }
-
-    // 3. Explicit Connection Type A: 🤝 Co-authorship & Joint Projects
-    if (mode === 'all' || mode === 'coauthor') {
+    const links: GraphLink[] = [];
+    if (edgeMode === 'all' || edgeMode === 'coauthor') {
       for (const e of edges) {
-        if (!visibleIds.has(e.source) || !visibleIds.has(e.target)) continue;
+        if (!includeIds.has(e.source) || !includeIds.has(e.target)) continue;
+        const a = rById.get(e.source)!;
+        const b = rById.get(e.target)!;
+        const isCross = a.primaryAxis !== b.primaryAxis;
         links.push({
-          id: `co-${e.id}`,
+          id: e.id,
           source: e.source,
           target: e.target,
           kind: 'coauthor',
-          tag: lang === 'pt' ? '🤝 Coautoria / Projeto' : '🤝 Co-authors / Project',
-          color: '#2DD4BF',
+          weight: isCross ? 2.6 : 1.5,
+          tag: `🤝 ${e.paperCount || 1} art.`,
+          detail: e.samplePaperTitle,
+          color: isCross ? '#2DD4BF' : 'rgba(148, 163, 184, 0.55)',
         });
       }
     }
 
-    // 4. Explicit Connection Type B: 📍 Shared Territory (Cross-Axis)
-    if (mode === 'all' || mode === 'territory') {
-      const terrBridges = bridges
-        .filter((b) => b.sharedRegions.length > 0 && visibleIds.has(b.sourceId) && visibleIds.has(b.targetId))
-        .slice(0, 48);
-      for (const b of terrBridges) {
-        const reg = REGION_MAP[b.sharedRegions[0]];
+    if (edgeMode === 'all' || edgeMode === 'topic') {
+      const relBridges = bridges
+        .filter((b) => includeIds.has(b.sourceId) && includeIds.has(b.targetId))
+        .slice(0, egoId ? 10 : 28);
+      for (const b of relBridges) {
         links.push({
-          id: `terr-${b.id}`,
-          source: b.sourceId,
-          target: b.targetId,
-          kind: 'territory',
-          tag: reg ? `${reg.emoji} ${reg.shortName[lang]}` : '📍 Território',
-          color: '#34D399',
-        });
-      }
-    }
-
-    // 5. Explicit Connection Type C: 🔗 Offer ↔ Need Topic Match (Cross-Axis)
-    if (mode === 'all' || mode === 'topic') {
-      const topicBridges = bridges
-        .filter((b) => b.matchedHandshakes.length > 0 && visibleIds.has(b.sourceId) && visibleIds.has(b.targetId))
-        .slice(0, 48);
-      for (const b of topicBridges) {
-        const dom = DOMAIN_LABELS[b.matchedHandshakes[0].offer.domain];
-        links.push({
-          id: `top-${b.id}`,
+          id: b.id,
           source: b.sourceId,
           target: b.targetId,
           kind: 'topic',
-          tag: `${dom.emoji} ${dom.pt}`,
+          weight: 1.6,
+          tag: b.reasons[0]?.shortTag[lang] || '🧬 Tema comum',
           color: '#FBBF24',
         });
       }
     }
 
     return { nodes, links };
-  }, [researchers, edges, bridges, mode, selectedAxis, lang]);
+  }, [isMacro, researchers, edges, bridges, expandedAxes, egoId, edgeMode, lang, rById]);
 
-  // Search match
   const searchedResearchers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     if (!q) return [];
@@ -248,7 +324,6 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
       .slice(0, 6);
   }, [researchers, searchQuery]);
 
-  // Canvas Simulation & Render
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -262,21 +337,23 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
     canvas.style.width = `${width}px`;
     canvas.style.height = `${height}px`;
 
-    const prevPos = new Map(nodesRef.current.map((n) => [n.id, { x: n.x, y: n.y }]));
+    transformRef.current = zoomIdentity;
+
     const simNodes: GraphNode[] = graphData.nodes.map((n) => {
-      const hubPos = getAxisHubPosition(n.axisId, width, height);
-      if (n.kind === 'axis_hub') {
-        return { ...n, x: hubPos.x, y: hubPos.y, fx: hubPos.x, fy: hubPos.y };
+      if (n.kind === 'axis_bubble') {
+        const pos = getMacroPos(n.axisId, width, height);
+        return { ...n, x: pos.x, y: pos.y, fx: pos.x, fy: pos.y };
       }
-      const prev = prevPos.get(n.id);
+      if (egoId && n.id === egoId) {
+        return { ...n, x: width / 2, y: height / 2 };
+      }
       return {
         ...n,
-        x: prev?.x ?? hubPos.x + (Math.random() - 0.5) * 55,
-        y: prev?.y ?? hubPos.y + (Math.random() - 0.5) * 55,
+        x: width / 2 + (Math.random() - 0.5) * 260,
+        y: height / 2 + (Math.random() - 0.5) * 220,
       };
     });
     const simLinks: GraphLink[] = graphData.links.map((l) => ({ ...l }));
-    nodesRef.current = simNodes;
 
     const draw = () => {
       ctx.save();
@@ -289,160 +366,133 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
 
       const cx = width / 2;
       const cy = height / 2;
-      const activeId = hoveredIdRef.current || spotlightId;
+      const hoverId = hoveredIdRef.current;
 
-      // Determine connected neighbors of activeId or selectedAxis
-      const connectedNodeIds = new Set<string>();
-      const highlightedLinks: GraphLink[] = [];
-
-      if (activeId) {
-        connectedNodeIds.add(activeId);
-        for (const l of simLinks) {
-          if (l.kind === 'hub_tether') continue;
-          const s = (l.source as GraphNode).id;
-          const tg = (l.target as GraphNode).id;
-          if (s === activeId) {
-            connectedNodeIds.add(tg);
-            highlightedLinks.push(l);
-          } else if (tg === activeId) {
-            connectedNodeIds.add(s);
-            highlightedLinks.push(l);
-          }
-        }
-      } else if (selectedAxis) {
-        for (const n of simNodes) {
-          if (n.axisId === selectedAxis) connectedNodeIds.add(n.id);
-        }
-        for (const l of simLinks) {
-          if (l.kind === 'hub_tether') continue;
-          const s = l.source as GraphNode;
-          const tg = l.target as GraphNode;
-          if (s.axisId === selectedAxis || tg.axisId === selectedAxis) {
-            connectedNodeIds.add(s.id);
-            connectedNodeIds.add(tg.id);
-            highlightedLinks.push(l);
-          }
-        }
+      // Subtle guide ring in Macro View
+      if (isMacro) {
+        ctx.beginPath();
+        ctx.ellipse(
+          cx,
+          cy,
+          Math.min(width, height) * 0.35,
+          Math.min(width, height) * 0.34,
+          0,
+          0,
+          Math.PI * 2
+        );
+        ctx.strokeStyle = 'rgba(148, 163, 184, 0.12)';
+        ctx.setLineDash([4, 6]);
+        ctx.stroke();
+        ctx.setLineDash([]);
       }
 
-      const hasFilter = Boolean(activeId || selectedAxis);
-
-      // 1. Draw Links
+      // Draw Links
       for (const l of simLinks) {
         const s = l.source as GraphNode;
         const tg = l.target as GraphNode;
         if (s.x == null || s.y == null || tg.x == null || tg.y == null) continue;
 
-        if (l.kind === 'hub_tether') {
-          const dim = hasFilter && !connectedNodeIds.has(tg.id);
-          ctx.beginPath();
-          ctx.moveTo(s.x, s.y);
-          ctx.lineTo(tg.x, tg.y);
-          ctx.strokeStyle = `${l.color}${dim ? '12' : '38'}`;
-          ctx.lineWidth = 1;
-          ctx.stroke();
-          continue;
-        }
-
-        const isHighlighted =
-          (activeId && (s.id === activeId || tg.id === activeId)) ||
-          (selectedAxis && (s.axisId === selectedAxis || tg.axisId === selectedAxis));
-
-        if (hasFilter && !isHighlighted) {
-          continue; // Hide unrelated cross-lines when focusing to keep graph ultra-clean!
-        }
+        const touchesHover = hoverId && (s.id === hoverId || tg.id === hoverId);
+        const dimmed = Boolean(hoverId && !touchesHover);
 
         ctx.save();
         ctx.beginPath();
         const mx = (s.x + tg.x) / 2;
         const my = (s.y + tg.y) / 2;
-        const ctrlX = mx + (cx - mx) * 0.15;
-        const ctrlY = my + (cy - my) * 0.15;
+        const ctrlX = mx + (cx - mx) * 0.14;
+        const ctrlY = my + (cy - my) * 0.14;
         ctx.moveTo(s.x, s.y);
         ctx.quadraticCurveTo(ctrlX, ctrlY, tg.x, tg.y);
 
         ctx.strokeStyle = l.color;
-        ctx.globalAlpha = isHighlighted ? 0.92 : 0.28;
-        ctx.lineWidth = isHighlighted ? 2.3 : 1.2;
-        if (l.kind !== 'coauthor') {
+        ctx.globalAlpha = dimmed ? 0.08 : touchesHover ? 0.96 : isMacro ? 0.72 : 0.62;
+        ctx.lineWidth = touchesHover ? l.weight + 1.2 : l.weight;
+        if (l.kind === 'topic') {
           ctx.setLineDash([5, 4]);
         }
         ctx.stroke();
+
+        // Draw badge on link when hovered (or on major macro co-authorship chords)
+        if (touchesHover || (isMacro && l.kind === 'coauthor' && l.weight >= 3.2 && !hoverId)) {
+          const bx = (s.x + tg.x) / 2 + (cx - mx) * 0.07;
+          const by = (s.y + tg.y) / 2 + (cy - my) * 0.07;
+          ctx.font = '600 10px Inter, sans-serif';
+          const tw = ctx.measureText(l.tag).width;
+          ctx.globalAlpha = 0.95;
+          ctx.fillStyle = '#091219';
+          ctx.strokeStyle = l.color;
+          ctx.lineWidth = 1;
+          ctx.setLineDash([]);
+          ctx.beginPath();
+          ctx.roundRect(bx - tw / 2 - 5, by - 8.5, tw + 10, 17, 5);
+          ctx.fill();
+          ctx.stroke();
+          ctx.fillStyle = '#F8FAFC';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(l.tag, bx, by);
+        }
+
         ctx.restore();
       }
 
-      // 2. Draw Visual Reason Tags right on highlighted connection lines (up to 8 clearest tags)
-      if (activeId && highlightedLinks.length > 0) {
-        for (const l of highlightedLinks.slice(0, 7)) {
-          const s = l.source as GraphNode;
-          const tg = l.target as GraphNode;
-          if (s.x == null || s.y == null || tg.x == null || tg.y == null) continue;
-          const mx = (s.x + tg.x) / 2;
-          const my = (s.y + tg.y) / 2;
-          ctx.save();
-          ctx.font = '600 10px Inter, sans-serif';
-          const tw = ctx.measureText(l.tag).width;
-          ctx.fillStyle = 'rgba(11, 18, 25, 0.92)';
-          ctx.strokeStyle = l.color;
-          ctx.lineWidth = 1.2;
-          ctx.beginPath();
-          ctx.roundRect(mx - tw / 2 - 6, my - 9, tw + 12, 18, 6);
-          ctx.fill();
-          ctx.stroke();
-          ctx.fillStyle = '#FFFFFF';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillText(l.tag, mx, my);
-          ctx.restore();
-        }
-      }
-
-      // 3. Draw Nodes
+      // Draw Nodes
       for (const n of simNodes) {
         if (n.x == null || n.y == null) continue;
+        const isHovered = hoverId === n.id;
 
-        if (n.kind === 'axis_hub') {
-          const isAxisActive = selectedAxis === n.axisId;
+        if (n.kind === 'axis_bubble') {
           ctx.save();
-          if (isAxisActive) {
+          if (isHovered) {
             ctx.beginPath();
-            ctx.arc(n.x, n.y, n.radius + 7, 0, Math.PI * 2);
-            ctx.fillStyle = `${n.color}44`;
+            ctx.arc(n.x, n.y, n.radius + 9, 0, Math.PI * 2);
+            ctx.fillStyle = `${n.color}40`;
             ctx.fill();
           }
+
           ctx.beginPath();
           ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
-          ctx.fillStyle = n.color;
+          ctx.fillStyle = `${n.color}26`;
           ctx.fill();
-          ctx.strokeStyle = '#FFFFFF';
-          ctx.lineWidth = isAxisActive ? 3 : 2;
+          ctx.strokeStyle = n.color;
+          ctx.lineWidth = isHovered ? 3.5 : 2.5;
           ctx.stroke();
 
-          ctx.font = '800 11px "JetBrains Mono", monospace';
+          ctx.font = '800 13px "JetBrains Mono", monospace';
           ctx.fillStyle = '#FFFFFF';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
-          ctx.fillText(n.label, n.x, n.y);
+          ctx.fillText(n.label, n.x, n.y - 5);
 
-          // Axis short name pill outside hub
+          ctx.font = '600 9.5px Inter, sans-serif';
+          ctx.fillStyle = '#CBD5E1';
+          ctx.fillText(n.countLabel || '', n.x, n.y + 10);
+
+          // Outer short axis title
           const angle = ((n.axisId - 1) / 11) * Math.PI * 2 - Math.PI / 2;
-          const lx = n.x + Math.cos(angle) * 34;
-          const ly = n.y + Math.sin(angle) * 30;
-          ctx.font = '700 10px Inter, sans-serif';
-          ctx.fillStyle = 'rgba(241, 245, 249, 0.9)';
+          const lx = n.x + Math.cos(angle) * (n.radius + 26);
+          const ly = n.y + Math.sin(angle) * (n.radius + 20);
+          ctx.font = '700 11px Inter, sans-serif';
+          ctx.fillStyle = isHovered ? '#5EEAD4' : '#F8FAFC';
           ctx.fillText(n.sublabel, lx, ly);
           ctx.restore();
           continue;
         }
 
-        const isHovered = activeId === n.id;
-        const isVisible = !hasFilter || connectedNodeIds.has(n.id);
-        const isLead = n.researcher?.role === 'coordinator' || n.researcher?.role === 'pi';
+        // Researcher Node in Expanded View
+        const connectedToHover =
+          !hoverId ||
+          hoverId === n.id ||
+          simLinks.some((l) => {
+            const s = (l.source as GraphNode).id;
+            const tg = (l.target as GraphNode).id;
+            return (s === hoverId && tg === n.id) || (tg === hoverId && s === n.id);
+          });
 
         ctx.save();
-        ctx.globalAlpha = isVisible ? 1 : 0.14;
+        ctx.globalAlpha = connectedToHover ? 1 : 0.18;
 
-        if (isHovered) {
+        if (isHovered || egoId === n.id) {
           ctx.beginPath();
           ctx.arc(n.x, n.y, n.radius + 6, 0, Math.PI * 2);
           ctx.fillStyle = `${n.color}55`;
@@ -464,36 +514,31 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
             n.radius * 2
           );
           ctx.restore();
-
-          ctx.beginPath();
-          ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
-          ctx.strokeStyle = isHovered ? '#FFFFFF' : n.color;
-          ctx.lineWidth = isHovered ? 2.5 : 2;
-          ctx.stroke();
         } else {
           ctx.beginPath();
           ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
           ctx.fillStyle = n.color;
           ctx.fill();
-          ctx.strokeStyle = isHovered ? '#FFFFFF' : '#081016';
-          ctx.lineWidth = isHovered ? 2.2 : 1.2;
-          ctx.stroke();
         }
 
-        // Show name label for PIs, hovered/connected nodes, or when zoomed in
-        if ((isLead || isHovered || (hasFilter && isVisible) || tr.k >= 1.55) && isVisible) {
-          const shortName = n.label.split(' ').slice(0, 2).join(' ');
-          ctx.font = `${isLead || isHovered ? '700' : '500'} 10px Inter, sans-serif`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'top';
-          const tw = ctx.measureText(shortName).width;
-          ctx.fillStyle = 'rgba(8, 16, 22, 0.84)';
-          ctx.beginPath();
-          ctx.roundRect(n.x - tw / 2 - 4, n.y + n.radius + 3, tw + 8, 14, 4);
-          ctx.fill();
-          ctx.fillStyle = isHovered ? '#5EEAD4' : '#F8FAFC';
-          ctx.fillText(shortName, n.x, n.y + n.radius + 5);
-        }
+        ctx.beginPath();
+        ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
+        ctx.strokeStyle = isHovered ? '#FFFFFF' : n.color;
+        ctx.lineWidth = isHovered ? 3 : 2;
+        ctx.stroke();
+
+        // Always readable name in Expanded View!
+        const shortName = n.label.split(' ').slice(0, 2).join(' ');
+        ctx.font = `${isHovered ? '700' : '600'} 10.5px Inter, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'top';
+        const tw = ctx.measureText(shortName).width;
+        ctx.fillStyle = 'rgba(8, 16, 22, 0.86)';
+        ctx.beginPath();
+        ctx.roundRect(n.x - tw / 2 - 4, n.y + n.radius + 4, tw + 8, 15, 4);
+        ctx.fill();
+        ctx.fillStyle = isHovered ? '#5EEAD4' : '#F8FAFC';
+        ctx.fillText(shortName, n.x, n.y + n.radius + 6);
 
         ctx.restore();
       }
@@ -506,22 +551,32 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
         'link',
         forceLink<GraphNode, GraphLink>(simLinks)
           .id((d) => d.id)
-          .distance((l) => (l.kind === 'hub_tether' ? 42 : 140))
-          .strength((l) => (l.kind === 'hub_tether' ? 0.85 : 0.015))
+          .distance(isMacro ? 200 : 120)
+          .strength((l) => (isMacro ? 0 : l.kind === 'coauthor' ? 0.35 : 0.08))
       )
-      .force('charge', forceManyBody<GraphNode>().strength((d) => (d.kind === 'axis_hub' ? -220 : -38)))
-      .force('collide', forceCollide<GraphNode>().radius((d) => d.radius + 4).iterations(2))
-      .force(
-        'x',
-        forceX<GraphNode>((d) => getAxisHubPosition(d.axisId, width, height).x).strength(0.18)
-      )
-      .force(
-        'y',
-        forceY<GraphNode>((d) => getAxisHubPosition(d.axisId, width, height).y).strength(0.18)
-      );
+      .force('charge', forceManyBody<GraphNode>().strength(isMacro ? 0 : -260))
+      .force('collide', forceCollide<GraphNode>().radius((d) => d.radius + 18).iterations(2));
+
+    if (!isMacro) {
+      if (expandedAxes.length === 2) {
+        sim
+          .force(
+            'x',
+            forceX<GraphNode>((d) =>
+              d.axisId === expandedAxes[0] ? width * 0.3 : width * 0.7
+            ).strength(0.26)
+          )
+          .force('y', forceY<GraphNode>(height / 2).strength(0.12));
+      } else {
+        sim
+          .force('x', forceX<GraphNode>(width / 2).strength(0.09))
+          .force('y', forceY<GraphNode>(height / 2).strength(0.09));
+      }
+    }
 
     sim.on('tick', draw);
     simRef.current = sim;
+    draw();
 
     const findNodeAt = (clientX: number, clientY: number) => {
       const rect = canvas.getBoundingClientRect();
@@ -534,7 +589,7 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
       for (let i = simNodes.length - 1; i >= 0; i--) {
         const n = simNodes[i];
         if (n.x == null || n.y == null) continue;
-        const hitR = n.radius + 5;
+        const hitR = n.radius + 6;
         if ((gx - n.x) ** 2 + (gy - n.y) ** 2 <= hitR * hitR) {
           return { node: n, sx, sy };
         }
@@ -543,7 +598,7 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
     };
 
     const zoomBehavior = zoom<HTMLCanvasElement, unknown>()
-      .scaleExtent([0.45, 3.5])
+      .scaleExtent([0.5, 3])
       .filter((event) => {
         if (event.type === 'mousedown' || event.type === 'pointerdown') {
           if (findNodeAt(event.clientX, event.clientY)) return false;
@@ -558,7 +613,7 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
     zoomBehaviorRef.current = zoomBehavior;
     const d3Canvas = select(canvas);
     d3Canvas.call(zoomBehavior);
-    d3Canvas.call(zoomBehavior.transform, transformRef.current);
+    d3Canvas.call(zoomBehavior.transform, zoomIdentity);
 
     let pointerDownPos: { x: number; y: number } | null = null;
     let moved = false;
@@ -569,10 +624,10 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
         dragNodeRef.current = hit.node;
         pointerDownPos = { x: e.clientX, y: e.clientY };
         moved = false;
-        if (hit.node.kind !== 'axis_hub') {
+        if (hit.node.kind === 'researcher') {
           hit.node.fx = hit.node.x;
           hit.node.fy = hit.node.y;
-          sim.alphaTarget(0.2).restart();
+          sim.alphaTarget(0.25).restart();
         }
         canvas.setPointerCapture(e.pointerId);
       }
@@ -586,7 +641,7 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
         ) {
           moved = true;
         }
-        if (dragNodeRef.current.kind !== 'axis_hub') {
+        if (dragNodeRef.current.kind === 'researcher') {
           const rect = canvas.getBoundingClientRect();
           const tr = transformRef.current;
           dragNodeRef.current.fx = (e.clientX - rect.left - tr.x) / tr.k;
@@ -597,19 +652,41 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
       }
 
       const hit = findNodeAt(e.clientX, e.clientY);
-      const nextId = hit && hit.node.kind === 'researcher' ? hit.node.id : null;
+      const nextId = hit ? hit.node.id : null;
       canvas.style.cursor = hit ? 'pointer' : 'grab';
       if (hoveredIdRef.current !== nextId) {
         hoveredIdRef.current = nextId;
         draw();
       }
-      setHoveredNode(hit);
+      if (hit) {
+        const n = hit.node;
+        setHoveredInfo({
+          title: n.kind === 'axis_bubble' ? `${n.label} — ${n.sublabel}` : n.label,
+          subtitle:
+            n.kind === 'axis_bubble'
+              ? n.countLabel || ''
+              : `${n.sublabel} • ${
+                  n.researcher ? ROLE_LABELS[n.researcher.role][lang === 'pt' ? 'shortPt' : 'shortEn'] : ''
+                }`,
+          extra:
+            n.kind === 'axis_bubble'
+              ? lang === 'pt'
+                ? 'Clique para expandir pesquisadores'
+                : 'Click to expand researchers'
+              : n.countLabel,
+          color: n.color,
+          sx: hit.sx,
+          sy: hit.sy,
+        });
+      } else {
+        setHoveredInfo(null);
+      }
     };
 
     const onPointerUp = (e: PointerEvent) => {
       if (dragNodeRef.current) {
         const clicked = dragNodeRef.current;
-        if (clicked.kind !== 'axis_hub') {
+        if (clicked.kind === 'researcher') {
           clicked.fx = null;
           clicked.fy = null;
         }
@@ -620,11 +697,11 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
         } catch {}
 
         if (!moved) {
-          if (clicked.kind === 'axis_hub') {
-            setSelectedAxis((prev) => (prev === clicked.axisId ? null : clicked.axisId));
-            setSpotlightId(null);
+          if (clicked.kind === 'axis_bubble') {
+            setHoveredInfo(null);
+            hoveredIdRef.current = null;
+            setExpandedAxes([clicked.axisId]);
           } else if (clicked.researcher) {
-            setSpotlightId(clicked.researcher.id);
             onSelectResearcher(clicked.researcher.id);
           }
         }
@@ -642,195 +719,175 @@ export const NetworkGraphView: React.FC<NetworkGraphViewProps> = ({
       canvas.removeEventListener('pointermove', onPointerMove);
       canvas.removeEventListener('pointerup', onPointerUp);
     };
-  }, [graphData, dimensions, spotlightId, selectedAxis, lang, onSelectResearcher]);
+  }, [graphData, dimensions, isMacro, expandedAxes, egoId, lang, onSelectResearcher]);
 
-  const handleReset = () => {
-    setSelectedAxis(null);
-    setSpotlightId(null);
+  const toggleAxisPill = (axId: AxisId) => {
+    setEgoId(null);
     onClearFocusedResearcher();
-    const canvas = canvasRef.current;
-    if (canvas && zoomBehaviorRef.current) {
-      transformRef.current = zoomIdentity;
-      select(canvas).call(zoomBehaviorRef.current.transform, zoomIdentity);
-    }
-    simRef.current?.alpha(0.25).restart();
+    setExpandedAxes((prev) => {
+      if (prev.includes(axId)) return prev.filter((x) => x !== axId);
+      if (prev.length >= 2) return [prev[1], axId];
+      return [...prev, axId];
+    });
   };
 
   return (
     <div className="space-y-3">
-      {/* ONE Simple Visual Bar: How Are People Connected? + Search */}
-      <div className="bg-white dark:bg-[#121C26] rounded-2xl border border-slate-200 dark:border-slate-800 p-3 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs font-bold text-slate-500 dark:text-slate-400 mr-1">
-            {t.connectBy}
-          </span>
-          {(
-            [
-              { id: 'all', label: t.modes.all, dot: '#38BDF8' },
-              { id: 'coauthor', label: t.modes.coauthor, dot: '#2DD4BF' },
-              { id: 'territory', label: t.modes.territory, dot: '#34D399' },
-              { id: 'topic', label: t.modes.topic, dot: '#FBBF24' },
-            ] as const
-          ).map((m) => {
-            const active = mode === m.id;
-            return (
+      {/* Top Bar: Progressive Disclosure Controls */}
+      <div className="bg-white dark:bg-[#121C26] rounded-2xl border border-slate-200 dark:border-slate-800 p-3 space-y-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            {!isMacro && (
+              <button
+                onClick={() => {
+                  setExpandedAxes([]);
+                  setEgoId(null);
+                  onClearFocusedResearcher();
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-teal-600 text-white hover:bg-teal-500 shadow-xs cursor-pointer"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                {t.backToMacro}
+              </button>
+            )}
+
+            <span className="text-xs font-bold text-slate-400">{t.connectBy}</span>
+            {(
+              [
+                { id: 'all', label: t.modes.all },
+                { id: 'coauthor', label: t.modes.coauthor },
+                { id: 'topic', label: t.modes.topic },
+              ] as const
+            ).map((m) => (
               <button
                 key={m.id}
-                onClick={() => setMode(m.id)}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border transition cursor-pointer ${
-                  active
-                    ? 'bg-slate-900 dark:bg-teal-600 text-white border-transparent shadow-xs'
-                    : 'bg-slate-50 dark:bg-[#0B1219] text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-800 hover:border-slate-400'
+                onClick={() => setEdgeMode(m.id)}
+                className={`px-2.5 py-1.5 rounded-xl text-xs font-bold border transition cursor-pointer ${
+                  edgeMode === m.id
+                    ? 'bg-slate-900 dark:bg-slate-700 text-white border-transparent'
+                    : 'bg-slate-50 dark:bg-[#0B1219] text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-800'
                 }`}
               >
-                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: m.dot }} />
                 {m.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Search Researcher */}
+          <div className="relative">
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder={t.searchNode}
+              className="pl-8 pr-7 py-1.5 rounded-xl bg-slate-50 dark:bg-[#0B1219] border border-slate-200 dark:border-slate-800 text-xs text-slate-900 dark:text-white w-52 focus:outline-none focus:border-teal-500"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 cursor-pointer"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
+
+            {searchedResearchers.length > 0 && (
+              <div className="absolute right-0 mt-1 w-64 rounded-xl bg-white dark:bg-[#121C26] border border-slate-200 dark:border-slate-700 shadow-xl z-30 py-1">
+                {searchedResearchers.map((r) => (
+                  <button
+                    key={r.id}
+                    onClick={() => {
+                      setEgoId(r.id);
+                      setExpandedAxes([r.primaryAxis]);
+                      setSearchQuery('');
+                    }}
+                    className="w-full px-3 py-1.5 text-left text-xs hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-between gap-2 cursor-pointer"
+                  >
+                    <span className="font-semibold text-slate-900 dark:text-white truncate">
+                      {r.name}
+                    </span>
+                    <span
+                      className="px-1.5 py-0.2 rounded text-[10px] font-mono-code font-bold text-white shrink-0"
+                      style={{ backgroundColor: AXIS_MAP[r.primaryAxis].color }}
+                    >
+                      {AXIS_MAP[r.primaryAxis].code}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* 11-Axis Selector Strip (Click 1 or 2 Axes to Expand/Compare!) */}
+        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pt-1">
+          {AXES.map((ax) => {
+            const active = expandedAxes.includes(ax.id);
+            return (
+              <button
+                key={ax.id}
+                onClick={() => toggleAxisPill(ax.id)}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold whitespace-nowrap border transition cursor-pointer ${
+                  active
+                    ? 'text-white shadow-xs'
+                    : 'bg-slate-50 dark:bg-[#0B1219] text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-800 hover:border-slate-400'
+                }`}
+                style={active ? { backgroundColor: ax.color, borderColor: ax.color } : undefined}
+              >
+                <span
+                  className="w-2 h-2 rounded-full"
+                  style={{ backgroundColor: active ? '#fff' : ax.color }}
+                />
+                <span className="font-mono-code">{ax.code}</span>
+                <span>{ax.shortName[lang]}</span>
               </button>
             );
           })}
         </div>
-
-        {/* Simple Person Finder */}
-        <div className="relative">
-          <div className="flex items-center gap-2">
-            <div className="relative">
-              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder={t.searchNode}
-                className="pl-8 pr-7 py-1.5 rounded-xl bg-slate-50 dark:bg-[#0B1219] border border-slate-200 dark:border-slate-800 text-xs text-slate-900 dark:text-white w-48 focus:outline-none focus:border-teal-500"
-              />
-              {searchQuery && (
-                <button
-                  onClick={() => setSearchQuery('')}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 cursor-pointer"
-                >
-                  <X className="w-3 h-3" />
-                </button>
-              )}
-            </div>
-            <button
-              onClick={handleReset}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-200 cursor-pointer"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              {t.resetZoom}
-            </button>
-          </div>
-
-          {searchedResearchers.length > 0 && (
-            <div className="absolute right-0 mt-1 w-64 rounded-xl bg-white dark:bg-[#121C26] border border-slate-200 dark:border-slate-700 shadow-xl z-30 py-1">
-              {searchedResearchers.map((r) => (
-                <button
-                  key={r.id}
-                  onClick={() => {
-                    setSpotlightId(r.id);
-                    setSearchQuery('');
-                  }}
-                  className="w-full px-3 py-1.5 text-left text-xs hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-between gap-2 cursor-pointer"
-                >
-                  <span className="font-semibold text-slate-900 dark:text-white truncate">
-                    {r.name}
-                  </span>
-                  <span
-                    className="px-1.5 py-0.2 rounded text-[10px] font-mono-code font-bold text-white shrink-0"
-                    style={{ backgroundColor: AXIS_MAP[r.primaryAxis].color }}
-                  >
-                    {AXIS_MAP[r.primaryAxis].code}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
       </div>
 
-      {/* Main Graph Canvas */}
+      {/* Canvas Observatory */}
       <div
         ref={containerRef}
-        className="relative w-full h-[640px] lg:h-[700px] rounded-2xl overflow-hidden observatory-bg border border-slate-800 shadow-xl"
+        className="relative w-full h-[630px] lg:h-[680px] rounded-2xl overflow-hidden observatory-bg border border-slate-800 shadow-xl"
       >
         <canvas ref={canvasRef} className="block w-full h-full touch-none" />
 
-        {/* Active Spotlight Pill */}
-        {(spotlightId || selectedAxis) && (
-          <div className="absolute top-3.5 left-3.5 px-3 py-1.5 rounded-xl bg-slate-950/85 border border-teal-500/40 text-xs text-white flex items-center gap-2">
-            <span>
-              {selectedAxis
-                ? `${AXIS_MAP[selectedAxis].code} — ${AXIS_MAP[selectedAxis].shortName[lang]}`
-                : researchers.find((r) => r.id === spotlightId)?.name}
-            </span>
-            <button
-              onClick={() => {
-                setSpotlightId(null);
-                setSelectedAxis(null);
-                onClearFocusedResearcher();
-              }}
-              className="text-slate-400 hover:text-white cursor-pointer"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        )}
-
-        {/* Bottom Visual Legend */}
+        {/* Bottom Legend */}
         <div className="absolute bottom-3.5 left-3.5 right-3.5 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
-          <div className="px-3.5 py-2 rounded-xl bg-slate-950/80 backdrop-blur-md border border-slate-800 text-[11px] text-slate-200 flex flex-wrap items-center gap-4">
+          <div className="px-3.5 py-2 rounded-xl bg-slate-950/85 backdrop-blur-md border border-slate-800 text-[11px] text-slate-200 flex flex-wrap items-center gap-4">
             <span className="flex items-center gap-1.5">
               <span className="w-4 h-0.5 bg-[#2DD4BF] inline-block" />
-              🤝 {lang === 'pt' ? 'Coautoria / Projeto' : 'Co-authors'}
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="w-4 h-0 border-t-2 border-dashed border-[#34D399] inline-block" />
-              📍 {lang === 'pt' ? 'Mesmo Território' : 'Same Territory'}
+              🤝 {lang === 'pt' ? 'Artigos em coautoria (Crossref/OpenAlex)' : 'Real co-authored papers'}
             </span>
             <span className="flex items-center gap-1.5">
               <span className="w-4 h-0 border-t-2 border-dashed border-[#FBBF24] inline-block" />
-              🔗 {lang === 'pt' ? 'Oferta ↔ Demanda' : 'Offer ↔ Need'}
+              🧬 {lang === 'pt' ? 'Mesmo tema científico (0 artigos juntos)' : 'Shared topic (0 joint papers)'}
             </span>
           </div>
-
-          <div className="px-3 py-1.5 rounded-xl bg-slate-950/75 border border-slate-800 text-[11px] text-slate-400 hidden md:block">
-            {t.clickHint}
+          <div className="px-3 py-1.5 rounded-xl bg-slate-950/80 border border-slate-800 text-[11px] text-slate-400 hidden md:block">
+            {isMacro ? t.macroHint : t.expandedHint}
           </div>
         </div>
 
         {/* Hover Card */}
-        {hoveredNode && !dragNodeRef.current && (
+        {hoveredInfo && !dragNodeRef.current && (
           <div
             className="pointer-events-none absolute z-20 max-w-xs px-3 py-2 rounded-xl bg-slate-950/95 border border-slate-700 shadow-2xl text-xs text-white"
             style={{
-              left: Math.min(dimensions.width - 230, Math.max(12, hoveredNode.sx + 14)),
-              top: Math.min(dimensions.height - 95, Math.max(12, hoveredNode.sy - 10)),
+              left: Math.min(dimensions.width - 240, Math.max(12, hoveredInfo.sx + 14)),
+              top: Math.min(dimensions.height - 95, Math.max(12, hoveredInfo.sy - 10)),
             }}
           >
-            {hoveredNode.node.kind === 'researcher' && hoveredNode.node.researcher ? (
-              <>
-                <div className="flex items-center gap-1.5 mb-0.5">
-                  <span
-                    className="px-1.5 py-0.2 rounded text-[10px] font-mono-code font-bold text-white"
-                    style={{ backgroundColor: hoveredNode.node.color }}
-                  >
-                    {AXIS_MAP[hoveredNode.node.researcher.primaryAxis].code}
-                  </span>
-                  <span className="text-[10px] text-slate-400">
-                    {ROLE_LABELS[hoveredNode.node.researcher.role][lang === 'pt' ? 'shortPt' : 'shortEn']}
-                  </span>
-                </div>
-                <div className="font-display font-bold text-sm">{hoveredNode.node.label}</div>
-                <div className="text-[11px] text-slate-300">
-                  {hoveredNode.node.researcher.unit}
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="font-mono-code font-bold" style={{ color: hoveredNode.node.color }}>
-                  {hoveredNode.node.label}
-                </div>
-                <div className="font-bold">{hoveredNode.node.sublabel}</div>
-              </>
+            <div className="font-display font-bold text-sm" style={{ color: hoveredInfo.color }}>
+              {hoveredInfo.title}
+            </div>
+            <div className="text-[11px] text-slate-300 mt-0.5">{hoveredInfo.subtitle}</div>
+            {hoveredInfo.extra && (
+              <div className="text-[10px] text-teal-400 font-semibold mt-1">
+                {hoveredInfo.extra}
+              </div>
             )}
           </div>
         )}

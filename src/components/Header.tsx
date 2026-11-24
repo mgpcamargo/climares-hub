@@ -1,6 +1,5 @@
 import React from 'react';
 import {
-  Handshake,
   Map as MapIcon,
   MessageSquare,
   Moon,
@@ -19,6 +18,7 @@ interface HeaderProps {
   darkMode: boolean;
   onToggleDark: () => void;
   memberCount: number;
+  muralCount: number;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -29,6 +29,7 @@ export const Header: React.FC<HeaderProps> = ({
   darkMode,
   onToggleDark,
   memberCount,
+  muralCount,
 }) => {
   const t = UI[lang];
 
@@ -36,12 +37,11 @@ export const Header: React.FC<HeaderProps> = ({
     { id: 'people', label: t.nav.people, icon: <Users className="w-4 h-4" />, badge: memberCount },
     { id: 'graph', label: t.nav.graph, icon: <Network className="w-4 h-4" /> },
     { id: 'map', label: t.nav.map, icon: <MapIcon className="w-4 h-4" /> },
-    { id: 'handshakes', label: t.nav.handshakes, icon: <Handshake className="w-4 h-4" /> },
-    { id: 'forum', label: t.nav.forum, icon: <MessageSquare className="w-4 h-4" /> },
+    { id: 'mural', label: t.nav.mural, icon: <MessageSquare className="w-4 h-4" />, badge: muralCount },
   ];
 
   return (
-    <header className="sticky top-0 z-40 bg-white/90 dark:bg-[#0D151D]/92 backdrop-blur-md border-b border-slate-200/80 dark:border-slate-800/90 transition-colors">
+    <header className="sticky top-0 z-40 bg-white/92 dark:bg-[#0D151D]/94 backdrop-blur-md border-b border-slate-200/80 dark:border-slate-800/90 transition-colors">
       <div className="max-w-[1560px] mx-auto px-4 lg:px-6 h-16 flex items-center justify-between gap-3">
         {/* Official CLIMARES Logo + Brand */}
         <button
@@ -59,7 +59,7 @@ export const Header: React.FC<HeaderProps> = ({
                 CLIMARES <span className="text-teal-600 dark:text-teal-400">Hub</span>
               </span>
               <span className="px-1.5 py-0.5 rounded text-[10px] font-mono-code font-bold bg-teal-500/15 text-teal-700 dark:text-teal-300 border border-teal-500/25">
-                v1.1
+                v2.0
               </span>
             </div>
             <p className="text-[10px] text-slate-500 dark:text-slate-400 font-medium hidden sm:block">
@@ -68,8 +68,8 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </button>
 
-        {/* Center Navigation Tabs (5 clean tabs) */}
-        <nav className="flex items-center gap-1 overflow-x-auto no-scrollbar">
+        {/* Center Navigation Tabs (4 focused tabs) */}
+        <nav className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
           {navItems.map((item) => {
             const active = activeView === item.id;
             return (
@@ -84,7 +84,7 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 {item.icon}
                 <span>{item.label}</span>
-                {item.badge !== undefined && (
+                {item.badge !== undefined && item.badge > 0 && (
                   <span
                     className={`text-[10px] font-mono-code px-1.5 py-0.2 rounded-full ${
                       active

@@ -1,40 +1,33 @@
 import { useEffect, useMemo, useState } from 'react';
 import { DirectoryView } from './components/DirectoryView';
-import { ForumView } from './components/ForumView';
-import { HandshakesView } from './components/HandshakesView';
 import { Header } from './components/Header';
+import { MuralView } from './components/MuralView';
 import { NetworkGraphView } from './components/NetworkGraphView';
 import { ResearcherDrawer } from './components/ResearcherDrawer';
 import { TerrainMapView } from './components/TerrainMapView';
 import { WarmIntroModal } from './components/WarmIntroModal';
 import { REGION_MAP } from './data/regionsAndHazards';
+import { SEED_EDGES, SEED_RESEARCHERS } from './data/seedData';
+import { computeLatentBridges } from './engine/bridgeEngine';
+import { fetchLiveMuralPosts } from './engine/liveBackend';
 import {
-  SEED_EDGES,
-  SEED_FORUM_THREADS,
-  SEED_RESEARCHERS,
-} from './data/seedData';
-import {
-  computeHandshakes,
-  computeLatentBridges,
-} from './engine/bridgeEngine';
-import {
-  CapabilityItem,
   CollaborationEdge,
-  ForumThread,
   HubView,
   Lang,
   LatentBridge,
   Researcher,
 } from './types';
 
-const STORAGE_KEY = 'climares_hub_v1_1_state';
-const THEME_KEY = 'climares_hub_v1_1_dark';
-const VALID_VIEWS: HubView[] = ['people', 'graph', 'map', 'handshakes', 'forum'];
+const THEME_KEY = 'climares_hub_v2_dark';
+const VALID_VIEWS: HubView[] = ['people', 'graph', 'map', 'mural'];
 
 function loadInitialUrlParams() {
   const params = new URLSearchParams(window.location.search);
-  const rawView = params.get('view') as HubView | null;
-  const view: HubView = rawView && VALID_VIEWS.includes(rawView) ? rawView : 'people';
+  const rawView = params.get('view');
+  // Map legacy 'forum' or 'handshakes' URLs smoothly to unified 'mural'
+  const mappedView =
+    rawView === 'forum' || rawView === 'handshakes' ? 'mural' : (rawView as HubView | null);
+  const view: HubView = mappedView && VALID_VIEWS.includes(mappedView) ? mappedView : 'people';
   const lang: Lang = params.get('lang') === 'en' ? 'en' : 'pt';
   const member = params.get('member') || null;
   const rawRegion = params.get('region');
@@ -45,7 +38,6 @@ function loadInitialUrlParams() {
 export default function App() {
   const initialUrl = useMemo(() => loadInitialUrlParams(), []);
 
-  // Default Dark Mode = true!
   const [darkMode, setDarkMode] = useState<boolean>(() => {
     try {
       const saved = localStorage.getItem(THEME_KEY);
@@ -57,33 +49,9 @@ export default function App() {
   const [lang, setLang] = useState<Lang>(initialUrl.lang);
   const [activeView, setActiveView] = useState<HubView>(initialUrl.view);
 
-  const [researchers, setResearchers] = useState<Researcher[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed.researchers) && parsed.researchers.length > 0) {
-          return parsed.researchers;
-        }
-      }
-    } catch {}
-    return SEED_RESEARCHERS;
-  });
-
+  const [researchers] = useState<Researcher[]>(SEED_RESEARCHERS);
   const [edges] = useState<CollaborationEdge[]>(SEED_EDGES);
-
-  const [forumThreads, setForumThreads] = useState<ForumThread[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed.forumThreads) && parsed.forumThreads.length > 0) {
-          return parsed.forumThreads;
-        }
-      }
-    } catch {}
-    return SEED_FORUM_THREADS;
-  });
+  const [muralCount, setMuralCount] = useState<number>(2);
 
   const [selectedResearcherId, setSelectedResearcherId] = useState<string | null>(
     initialUrl.member
@@ -97,7 +65,15 @@ export default function App() {
     bridge: LatentBridge | null;
   }>({ open: false, target: null, bridge: null });
 
-  // Apply Dark Mode class on <html>
+  // Fetch live Mural count on startup
+  useEffect(() => {
+    fetchLiveMuralPosts()
+      .then((posts) => {
+        if (posts.length > 0) setMuralCount(posts.length);
+      })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     const root = document.documentElement;
     if (darkMode) {
@@ -109,12 +85,6 @@ export default function App() {
       localStorage.setItem(THEME_KEY, String(darkMode));
     } catch {}
   }, [darkMode]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ researchers, forumThreads }));
-    } catch {}
-  }, [researchers, forumThreads]);
 
   useEffect(() => {
     document.documentElement.lang = lang === 'pt' ? 'pt-BR' : 'en';
@@ -131,7 +101,6 @@ export default function App() {
     window.history.replaceState({}, '', newUrl);
   }, [activeView, lang, selectedResearcherId, selectedRegionId]);
 
-  const handshakes = useMemo(() => computeHandshakes(researchers), [researchers]);
   const bridges = useMemo(
     () => computeLatentBridges(researchers, edges),
     [researchers, edges]
@@ -152,54 +121,6 @@ export default function App() {
     setIntroModal({ open: true, target, bridge });
   };
 
-  const handleAddCapability = (
-    researcherId: string,
-    kind: 'offer' | 'need',
-    item: CapabilityItem
-  ) => {
-    setResearchers((prev) =>
-      prev.map((r) => {
-        if (r.id !== researcherId) return r;
-        return kind === 'offer'
-          ? { ...r, offers: [item, ...r.offers] }
-          : { ...r, needs: [item, ...r.needs] };
-      })
-    );
-  };
-
-  const handleUpdatePhoto = (researcherId: string, photoUrl: string) => {
-    setResearchers((prev) =>
-      prev.map((r) => (r.id === researcherId ? { ...r, photoUrl: photoUrl || undefined } : r))
-    );
-  };
-
-  const handleCreateThread = (thread: ForumThread) => {
-    setForumThreads((prev) => [thread, ...prev]);
-  };
-
-  const handleAddReply = (threadId: string, authorId: string, body: string) => {
-    setForumThreads((prev) =>
-      prev.map((th) => {
-        if (th.id !== threadId) return th;
-        return {
-          ...th,
-          replies: [
-            ...th.replies,
-            {
-              id: `rep-${Date.now()}`,
-              authorId,
-              createdAt: new Date().toLocaleDateString('pt-BR', {
-                day: '2-digit',
-                month: 'short',
-              }),
-              body,
-            },
-          ],
-        };
-      })
-    );
-  };
-
   return (
     <div className="min-h-screen flex flex-col bg-[#F4F6F8] dark:bg-[#0B1117] text-slate-900 dark:text-slate-100 transition-colors">
       <Header
@@ -210,6 +131,7 @@ export default function App() {
         darkMode={darkMode}
         onToggleDark={() => setDarkMode((d) => !d)}
         memberCount={researchers.length}
+        muralCount={muralCount}
       />
 
       <main className="flex-1 max-w-[1560px] w-full mx-auto px-4 lg:px-6 py-5">
@@ -245,31 +167,16 @@ export default function App() {
           />
         )}
 
-        {activeView === 'handshakes' && (
-          <HandshakesView
-            researchers={researchers}
-            handshakes={handshakes}
-            bridges={bridges}
-            lang={lang}
-            onSelectResearcher={setSelectedResearcherId}
-            onOpenWarmIntro={handleOpenWarmIntro}
-            onAddCapability={handleAddCapability}
-          />
-        )}
-
-        {activeView === 'forum' && (
-          <ForumView
-            threads={forumThreads}
+        {activeView === 'mural' && (
+          <MuralView
             researchers={researchers}
             lang={lang}
             onSelectResearcher={setSelectedResearcherId}
-            onCreateThread={handleCreateThread}
-            onAddReply={handleAddReply}
+            onPostsLoaded={setMuralCount}
           />
         )}
       </main>
 
-      {/* Clean Footer with Official CLIMARES Wordmark */}
       <footer className="border-t border-slate-200 dark:border-slate-800/80 bg-white dark:bg-[#0D151D] mt-8">
         <div className="max-w-[1560px] mx-auto px-4 lg:px-6 py-4 flex flex-wrap items-center justify-between gap-4 text-xs text-slate-500 dark:text-slate-400">
           <div className="flex items-center gap-3">
@@ -301,13 +208,13 @@ export default function App() {
       <ResearcherDrawer
         researcher={selectedResearcher}
         allResearchers={researchers}
+        edges={edges}
         bridges={bridges}
         lang={lang}
         onClose={() => setSelectedResearcherId(null)}
         onSelectResearcher={setSelectedResearcherId}
         onCenterInGraph={handleCenterInGraph}
         onOpenWarmIntro={handleOpenWarmIntro}
-        onUpdatePhoto={handleUpdatePhoto}
       />
 
       <WarmIntroModal

@@ -80,12 +80,19 @@ export interface Researcher {
   institution: string;
   unit: string;
   city: string;
+  homeState?: string; // e.g. "SP", "PA", "RS"
   primaryAxis: AxisId;
   secondaryAxes: AxisId[];
   photoUrl?: string;
   bio: TextValue;
   email?: string;
   orcid?: string;
+  openalexId?: string;
+  worksCount?: number;
+  citedByCount?: number;
+  empiricalTopics?: string[];
+  studiedStates?: string[];
+  profileClaimed?: boolean;
   lattesUrl?: string;
   scholarUrl?: string;
   githubUrl?: string;
@@ -107,6 +114,9 @@ export interface CollaborationEdge {
   target: string;
   kind: EdgeKind;
   weight: number;
+  paperCount?: number;
+  samplePaperTitle?: string;
+  samplePaperDoi?: string;
   label: TextValue;
   year?: number;
 }
@@ -117,6 +127,7 @@ export interface StudyRegion {
   shortName: Localized;
   emoji: string;
   state: string;
+  states: string[];
   biome: Localized;
   lat: number;
   lng: number;
@@ -132,7 +143,7 @@ export interface Hazard {
 }
 
 export interface BridgeReason {
-  type: 'handshake' | 'region' | 'hazard' | 'method' | 'secondary_axis';
+  type: 'topic' | 'region' | 'handshake' | 'hazard';
   text: Localized;
   shortTag: Localized;
   weight: number;
@@ -146,30 +157,13 @@ export interface LatentBridge {
   targetAxis: AxisId;
   score: number;
   reasons: BridgeReason[];
+  sharedTopics: string[];
   sharedRegions: string[];
-  sharedHazards: string[];
-  matchedHandshakes: {
-    providerId: string;
-    seekerId: string;
-    offer: CapabilityItem;
-    need: CapabilityItem;
-  }[];
   alreadyConnected: boolean;
 }
 
-export interface HandshakeMatch {
-  id: string;
-  provider: Researcher;
-  seeker: Researcher;
-  offer: CapabilityItem;
-  need: CapabilityItem;
-  score: number;
-  sharedRegions: string[];
-  sharedHazards: string[];
-  crossAxis: boolean;
-}
-
-export type ForumFolderId =
+export type MuralFolderId =
+  | 'all'
   | 'general'
   | 'admin'
   | 'axis-1'
@@ -184,23 +178,36 @@ export type ForumFolderId =
   | 'axis-10'
   | 'axis-11';
 
-export interface ForumReply {
+export type MuralPostKind = 'discussion' | 'offer' | 'need' | 'paper';
+
+export interface MuralReply {
   id: string;
-  authorId: string;
+  authorName: string;
+  authorResearcherId?: string;
+  authorAvatarUrl?: string;
   createdAt: string;
   body: string;
 }
 
-export interface ForumThread {
+export interface MuralPost {
   id: string;
-  folderId: ForumFolderId;
+  issueNumber?: number;
+  issueUrl?: string;
+  folderId: Exclude<MuralFolderId, 'all'>;
+  kind: MuralPostKind;
   title: string;
-  authorId: string;
+  authorName: string;
+  authorResearcherId?: string;
+  authorUnit?: string;
+  authorAxis?: AxisId;
+  authorAvatarUrl?: string;
+  isSystemSeed?: boolean;
   createdAt: string;
   body: string;
   tags: string[];
   pinned?: boolean;
-  replies: ForumReply[];
+  repliesCount: number;
+  replies?: MuralReply[];
 }
 
-export type HubView = 'people' | 'graph' | 'map' | 'handshakes' | 'forum';
+export type HubView = 'people' | 'graph' | 'map' | 'mural';
