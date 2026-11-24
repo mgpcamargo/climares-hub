@@ -907,7 +907,6 @@ export const SEED_RESEARCHERS: Researcher[] = [
       "en": "Researcher in Axis 1 (IAG-USP). Xingu Basin hydroclimatic variability, CMIP7 projections (ESGF-NG), and cloud microphysics."
     },
     "githubUrl": "https://github.com/mgpcamargo",
-    "lattesUrl": "http://lattes.cnpq.br/",
     "methods": [
       "CMIP7 / ESGF-NG",
       "Python / Xarray",
@@ -950,20 +949,11 @@ export const SEED_RESEARCHERS: Researcher[] = [
       "dataset_share"
     ],
     "publications": [],
-    "openalexId": "A5035892919",
-    "orcid": "0000-0003-1347-8241",
-    "worksCount": 212,
-    "citedByCount": 4152,
-    "empiricalTopics": [
-      "Obsessive-Compulsive Spectrum Disorders",
-      "Anxiety, Depression, Psychometrics, Treatment, Cognitive Processes",
-      "Psychoanalysis and Psychopathology Research",
-      "Neural and Behavioral Psychology Studies",
-      "Deep Brain Stimulation and Movement Disorders"
-    ],
     "homeState": "SP",
     "studiedStates": [
-      "SP"
+      "SP",
+      "PA",
+      "MT"
     ],
     "profileClaimed": true
   },
@@ -12409,14 +12399,6 @@ export const SEED_RESEARCHERS: Researcher[] = [
         "year": 2025,
         "journal": "World Journal of Clinical Pediatrics",
         "doi": "https://doi.org/10.5409/wjcp.v14.i4.110750",
-        "coAuthorIds": [],
-        "crossAxis": false
-      },
-      {
-        "title": "Evaluating the safety of procedural sedation in emergency department settings among the pediatric population: a systematic review and meta-analysis of randomized controlled trials",
-        "year": 2025,
-        "journal": "Canadian Journal of Emergency Medicine",
-        "doi": "https://doi.org/10.1007/s43678-024-00809-x",
         "coAuthorIds": [],
         "crossAxis": false
       },
